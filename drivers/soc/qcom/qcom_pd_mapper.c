@@ -376,6 +376,15 @@ static const struct qcom_pdm_domain_data *msm8996_domains[] = {
 	NULL,
 };
 
+static const struct qcom_pdm_domain_data *msm8953_domains[] = {
+	&adsp_audio_pd,
+	&adsp_root_pd,
+	&adsp_sensor_pd,
+	&mpss_root_pd,
+	&mpss_wlan_pd,
+	NULL,
+};
+
 static const struct qcom_pdm_domain_data *msm8998_domains[] = {
 	&mpss_root_pd,
 	&mpss_wlan_pd,
@@ -566,6 +575,7 @@ static const struct of_device_id qcom_pdm_domains[] __maybe_unused = {
 	{ .compatible = "qcom,msm8909", .data = NULL, },
 	{ .compatible = "qcom,msm8916", .data = NULL, },
 	{ .compatible = "qcom,msm8939", .data = NULL, },
+	{ .compatible = "qcom,msm8953", .data = msm8953_domains, },
 	{ .compatible = "qcom,msm8974", .data = NULL, },
 	{ .compatible = "qcom,msm8996", .data = msm8996_domains, },
 	{ .compatible = "qcom,msm8998", .data = msm8998_domains, },
@@ -576,6 +586,7 @@ static const struct of_device_id qcom_pdm_domains[] __maybe_unused = {
 	{ .compatible = "qcom,sc7280", .data = sc7280_domains, },
 	{ .compatible = "qcom,sc8180x", .data = sc8180x_domains, },
 	{ .compatible = "qcom,sc8280xp", .data = sc8280xp_domains, },
+	{ .compatible = "qcom,sdm632", .data = msm8953_domains, },
 	{ .compatible = "qcom,sdm630", .data = sdm630_domains, },
 	{ .compatible = "qcom,sdm636", .data = sdm630_domains, },
 	{ .compatible = "qcom,sda660", .data = sdm660_domains, },
