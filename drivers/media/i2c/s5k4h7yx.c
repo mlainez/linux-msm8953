@@ -21,68 +21,68 @@
 #include <media/v4l2-fwnode.h>
 
 /* Streaming mode */
-#define S5K4H7YX_REG_MODE_SELECT	CCI_REG8(0x0100)
-#define S5K4H7YX_MODE_STANDBY		0x00
-#define S5K4H7YX_MODE_STREAMING		0x01
+#define S5K4H7YX_REG_MODE_SELECT CCI_REG8(0x0100)
+#define S5K4H7YX_MODE_STANDBY 0x00
+#define S5K4H7YX_MODE_STREAMING 0x01
 
 /* Chip ID */
-#define S5K4H7YX_REG_CHIP_ID		CCI_REG16(0x0000)
-#define S5K4H7YX_CHIP_ID		0x487B
+#define S5K4H7YX_REG_CHIP_ID CCI_REG16(0x0000)
+#define S5K4H7YX_CHIP_ID 0x487B
 
 /* Group hold */
-#define S5K4H7YX_REG_GROUP_HOLD		CCI_REG8(0x0104)
+#define S5K4H7YX_REG_GROUP_HOLD CCI_REG8(0x0104)
 
 /* Frame timing */
-#define S5K4H7YX_REG_FRM_LENGTH_LINES	CCI_REG16(0x0340)
-#define S5K4H7YX_REG_LINE_LENGTH_PCK	CCI_REG16(0x0342)
+#define S5K4H7YX_REG_FRM_LENGTH_LINES CCI_REG16(0x0340)
+#define S5K4H7YX_REG_LINE_LENGTH_PCK CCI_REG16(0x0342)
 
 /* Exposure control */
-#define S5K4H7YX_REG_EXPOSURE		CCI_REG16(0x0202)
-#define S5K4H7YX_EXPOSURE_MIN		4
-#define S5K4H7YX_EXPOSURE_STEP		1
-#define S5K4H7YX_EXPOSURE_DEFAULT	0x0208
-#define S5K4H7YX_EXPOSURE_OFFSET	8
+#define S5K4H7YX_REG_EXPOSURE CCI_REG16(0x0202)
+#define S5K4H7YX_EXPOSURE_MIN 4
+#define S5K4H7YX_EXPOSURE_STEP 1
+#define S5K4H7YX_EXPOSURE_DEFAULT 0x0208
+#define S5K4H7YX_EXPOSURE_OFFSET 8
 
 /* Analog gain control */
-#define S5K4H7YX_REG_ANALOG_GAIN	CCI_REG16(0x0204)
-#define S5K4H7YX_ANA_GAIN_MIN		32
-#define S5K4H7YX_ANA_GAIN_MAX		512
-#define S5K4H7YX_ANA_GAIN_STEP		1
-#define S5K4H7YX_ANA_GAIN_DEFAULT	32
+#define S5K4H7YX_REG_ANALOG_GAIN CCI_REG16(0x0204)
+#define S5K4H7YX_ANA_GAIN_MIN 32
+#define S5K4H7YX_ANA_GAIN_MAX 512
+#define S5K4H7YX_ANA_GAIN_STEP 1
+#define S5K4H7YX_ANA_GAIN_DEFAULT 32
 
 /* Digital gain control */
-#define S5K4H7YX_REG_GR_DIGITAL_GAIN	CCI_REG16(0x020e)
-#define S5K4H7YX_REG_R_DIGITAL_GAIN	CCI_REG16(0x0210)
-#define S5K4H7YX_REG_B_DIGITAL_GAIN	CCI_REG16(0x0212)
-#define S5K4H7YX_REG_GB_DIGITAL_GAIN	CCI_REG16(0x0214)
-#define S5K4H7YX_DGTL_GAIN_MIN		0x0100
-#define S5K4H7YX_DGTL_GAIN_MAX		0x1000
-#define S5K4H7YX_DGTL_GAIN_DEFAULT	0x0100
-#define S5K4H7YX_DGTL_GAIN_STEP	1
+#define S5K4H7YX_REG_GR_DIGITAL_GAIN CCI_REG16(0x020e)
+#define S5K4H7YX_REG_R_DIGITAL_GAIN CCI_REG16(0x0210)
+#define S5K4H7YX_REG_B_DIGITAL_GAIN CCI_REG16(0x0212)
+#define S5K4H7YX_REG_GB_DIGITAL_GAIN CCI_REG16(0x0214)
+#define S5K4H7YX_DGTL_GAIN_MIN 0x0100
+#define S5K4H7YX_DGTL_GAIN_MAX 0x1000
+#define S5K4H7YX_DGTL_GAIN_DEFAULT 0x0100
+#define S5K4H7YX_DGTL_GAIN_STEP 1
 
 /* Test pattern */
-#define S5K4H7YX_REG_TEST_PATTERN	CCI_REG16(0x0600)
+#define S5K4H7YX_REG_TEST_PATTERN CCI_REG16(0x0600)
 
 /* Orientation */
-#define S5K4H7YX_REG_ORIENTATION	CCI_REG8(0x0101)
-#define S5K4H7YX_ORIENT_HFLIP		BIT(0)
-#define S5K4H7YX_ORIENT_VFLIP		BIT(1)
+#define S5K4H7YX_REG_ORIENTATION CCI_REG8(0x0101)
+#define S5K4H7YX_ORIENT_HFLIP BIT(0)
+#define S5K4H7YX_ORIENT_VFLIP BIT(1)
 
 /* Pixel array */
-#define S5K4H7YX_NATIVE_WIDTH		3280U
-#define S5K4H7YX_NATIVE_HEIGHT		2464U
-#define S5K4H7YX_PIXEL_ARRAY_LEFT	8U
-#define S5K4H7YX_PIXEL_ARRAY_TOP	8U
-#define S5K4H7YX_PIXEL_ARRAY_WIDTH	3264U
-#define S5K4H7YX_PIXEL_ARRAY_HEIGHT	2448U
+#define S5K4H7YX_NATIVE_WIDTH 3280U
+#define S5K4H7YX_NATIVE_HEIGHT 2464U
+#define S5K4H7YX_PIXEL_ARRAY_LEFT 8U
+#define S5K4H7YX_PIXEL_ARRAY_TOP 8U
+#define S5K4H7YX_PIXEL_ARRAY_WIDTH 3264U
+#define S5K4H7YX_PIXEL_ARRAY_HEIGHT 2448U
 
-#define S5K4H7YX_VTS_MAX		65535
+#define S5K4H7YX_VTS_MAX 65535
 
 /* Regulator supplies */
-static const char * const s5k4h7yx_supply_name[] = {
-	"vana",		/* Analog (2.8V) supply */
-	"vdig",		/* Digital Core (1.2V) supply */
-	"vif",		/* IF (1.8V) supply */
+static const char *const s5k4h7yx_supply_name[] = {
+	"vana", /* Analog (2.8V) supply */
+	"vdig", /* Digital Core (1.2V) supply */
+	"vif", /* IF (1.8V) supply */
 };
 
 #define S5K4H7YX_NUM_SUPPLIES ARRAY_SIZE(s5k4h7yx_supply_name)
@@ -115,11 +115,9 @@ static const u32 s5k4h7yx_mbus_codes[] = {
 	MEDIA_BUS_FMT_SGBRG10_1X10,
 };
 
-static const char * const s5k4h7yx_test_pattern_menu[] = {
-	"Disabled",
-	"Solid Colour",
-	"Colour Bars",
-	"Colour Bars With Fade to Grey",
+static const char *const s5k4h7yx_test_pattern_menu[] = {
+	"Disabled",    "Solid Colour",
+	"Colour Bars", "Colour Bars With Fade to Grey",
 	"PN9",
 };
 
@@ -128,7 +126,11 @@ static const s64 s5k4h7yx_link_freq_menu[] = {
 	350000000LL,
 };
 
-#define REGS(_list) { .num_of_regs = ARRAY_SIZE(_list), .regs = _list, }
+#define REGS(_list)                               \
+	{                                         \
+		.num_of_regs = ARRAY_SIZE(_list), \
+		.regs = _list,                    \
+	}
 
 static u64 s5k4h7yx_link_freq_to_pixel_rate(u64 link_freq)
 {
@@ -139,28 +141,29 @@ static u64 s5k4h7yx_link_freq_to_pixel_rate(u64 link_freq)
 /* --- Common registers (PLL, CSI, MIPI config — same across all modes) --- */
 static const struct cci_reg_sequence s5k4h7yx_common_regs[] = {
 	/* PLL settings */
-	{ CCI_REG8(0x0301), 0x04 },	/* VT_PIX_CLK_DIV */
-	{ CCI_REG8(0x0303), 0x01 },	/* VT_SYS_CLK_DIV */
-	{ CCI_REG8(0x0305), 0x06 },	/* PREPLLCK_VT_DIV */
-	{ CCI_REG8(0x0306), 0x00 },	/* PLL_IVT_MPY[15:8] */
-	{ CCI_REG8(0x0307), 0x8C },	/* PLL_IVT_MPY[7:0] = 140 */
-	{ CCI_REG8(0x0309), 0x0A },	/* OP_PIX_CLK_DIV = 10 */
-	{ CCI_REG8(0x030B), 0x01 },	/* OP_SYS_CLK_DIV */
-	{ CCI_REG8(0x030D), 0x06 },	/* PREPLLCK_OP_DIV */
-	{ CCI_REG8(0x030F), 0xAF },	/* PLL_IOP_MPY = 175 */
+	{ CCI_REG8(0x0301), 0x04 }, /* VT_PIX_CLK_DIV */
+	{ CCI_REG8(0x0303), 0x01 }, /* VT_SYS_CLK_DIV */
+	{ CCI_REG8(0x0305), 0x06 }, /* PREPLLCK_VT_DIV */
+	{ CCI_REG8(0x0306), 0x00 }, /* PLL_IVT_MPY[15:8] */
+	{ CCI_REG8(0x0307), 0x8C }, /* PLL_IVT_MPY[7:0] = 140 */
+	{ CCI_REG8(0x0309), 0x0A }, /* OP_PIX_CLK_DIV = 10 */
+	{ CCI_REG8(0x030B), 0x01 }, /* OP_SYS_CLK_DIV */
+	{ CCI_REG8(0x030D), 0x06 }, /* PREPLLCK_OP_DIV */
+	{ CCI_REG8(0x030F), 0xAF }, /* PLL_IOP_MPY = 175 */
 
 	/* CSI data format: 10-bit RAW */
-	{ CCI_REG8(0x0112), 0x0A },	/* CSI_DT_FMT[15:8] */
-	{ CCI_REG8(0x0113), 0x0A },	/* CSI_DT_FMT[7:0] */
-	{ CCI_REG8(0x0114), 0x03 },	/* CSI_LANE_MODE = 4 lanes */
+	{ CCI_REG8(0x0112), 0x0A }, /* CSI_DT_FMT[15:8] */
+	{ CCI_REG8(0x0113), 0x0A }, /* CSI_DT_FMT[7:0] */
+	{ CCI_REG8(0x0114), 0x03 }, /* CSI_LANE_MODE = 4 lanes */
 
 	/* MIPI data rate: 700 Mbps */
-	{ CCI_REG8(0x0820), 0x02 },	/* REQ_LINK_BIT_RATE[31:24] */
-	{ CCI_REG8(0x0821), 0xBC },	/* REQ_LINK_BIT_RATE[23:16] = 0x02BC = 700 */
+	{ CCI_REG8(0x0820), 0x02 }, /* REQ_LINK_BIT_RATE[31:24] */
+	{ CCI_REG8(0x0821),
+	  0xBC }, /* REQ_LINK_BIT_RATE[23:16] = 0x02BC = 700 */
 
 	/* External clock frequency: 24 MHz */
-	{ CCI_REG8(0x0136), 0x18 },	/* EXCK_FREQ[15:8] */
-	{ CCI_REG8(0x0137), 0x00 },	/* EXCK_FREQ[7:0] */
+	{ CCI_REG8(0x0136), 0x18 }, /* EXCK_FREQ[15:8] */
+	{ CCI_REG8(0x0137), 0x00 }, /* EXCK_FREQ[7:0] */
 
 	/* Fine integration time */
 	{ CCI_REG8(0x0200), 0x0D },
@@ -188,90 +191,90 @@ static const struct cci_reg_sequence s5k4h7yx_common_regs[] = {
 
 /* Mode 0: 3264x2448 @30fps — full resolution, no binning */
 static const struct cci_reg_sequence s5k4h7yx_mode_3264x2448_regs[] = {
-	{ CCI_REG8(0x0344), 0x00 },	/* X_ADD_STA[15:8] = 8 */
-	{ CCI_REG8(0x0345), 0x08 },	/* X_ADD_STA[7:0] */
-	{ CCI_REG8(0x0346), 0x00 },	/* Y_ADD_STA[15:8] = 8 */
-	{ CCI_REG8(0x0347), 0x08 },	/* Y_ADD_STA[7:0] */
-	{ CCI_REG8(0x0348), 0x0C },	/* X_ADD_END[15:8] = 3271 */
-	{ CCI_REG8(0x0349), 0xC7 },	/* X_ADD_END[7:0] */
-	{ CCI_REG8(0x034A), 0x09 },	/* Y_ADD_END[15:8] = 2455 */
-	{ CCI_REG8(0x034B), 0x97 },	/* Y_ADD_END[7:0] */
-	{ CCI_REG8(0x034C), 0x0C },	/* X_OUT_SIZE[15:8] = 3264 */
-	{ CCI_REG8(0x034D), 0xC0 },	/* X_OUT_SIZE[7:0] */
-	{ CCI_REG8(0x034E), 0x09 },	/* Y_OUT_SIZE[15:8] = 2448 */
-	{ CCI_REG8(0x034F), 0x90 },	/* Y_OUT_SIZE[7:0] */
-	{ CCI_REG8(0x0340), 0x09 },	/* FLL[15:8] = 2530 */
-	{ CCI_REG8(0x0341), 0xE2 },	/* FLL[7:0] */
-	{ CCI_REG8(0x0900), 0x00 },	/* BINNING_MODE = off */
-	{ CCI_REG8(0x0901), 0x11 },	/* BINNING_TYPE = 1x1 */
-	{ CCI_REG8(0x0387), 0x01 },	/* Y_ODD_INC */
-	{ CCI_REG8(0x3906), 0x7E },	/* Vendor */
+	{ CCI_REG8(0x0344), 0x00 }, /* X_ADD_STA[15:8] = 8 */
+	{ CCI_REG8(0x0345), 0x08 }, /* X_ADD_STA[7:0] */
+	{ CCI_REG8(0x0346), 0x00 }, /* Y_ADD_STA[15:8] = 8 */
+	{ CCI_REG8(0x0347), 0x08 }, /* Y_ADD_STA[7:0] */
+	{ CCI_REG8(0x0348), 0x0C }, /* X_ADD_END[15:8] = 3271 */
+	{ CCI_REG8(0x0349), 0xC7 }, /* X_ADD_END[7:0] */
+	{ CCI_REG8(0x034A), 0x09 }, /* Y_ADD_END[15:8] = 2455 */
+	{ CCI_REG8(0x034B), 0x97 }, /* Y_ADD_END[7:0] */
+	{ CCI_REG8(0x034C), 0x0C }, /* X_OUT_SIZE[15:8] = 3264 */
+	{ CCI_REG8(0x034D), 0xC0 }, /* X_OUT_SIZE[7:0] */
+	{ CCI_REG8(0x034E), 0x09 }, /* Y_OUT_SIZE[15:8] = 2448 */
+	{ CCI_REG8(0x034F), 0x90 }, /* Y_OUT_SIZE[7:0] */
+	{ CCI_REG8(0x0340), 0x09 }, /* FLL[15:8] = 2530 */
+	{ CCI_REG8(0x0341), 0xE2 }, /* FLL[7:0] */
+	{ CCI_REG8(0x0900), 0x00 }, /* BINNING_MODE = off */
+	{ CCI_REG8(0x0901), 0x11 }, /* BINNING_TYPE = 1x1 */
+	{ CCI_REG8(0x0387), 0x01 }, /* Y_ODD_INC */
+	{ CCI_REG8(0x3906), 0x7E }, /* Vendor */
 };
 
 /* Mode 2: 1440x1080 @60fps — 2x2 binning, center crop */
 static const struct cci_reg_sequence s5k4h7yx_mode_1440x1080_regs[] = {
-	{ CCI_REG8(0x0344), 0x00 },	/* X_ADD_STA = 200 */
+	{ CCI_REG8(0x0344), 0x00 }, /* X_ADD_STA = 200 */
 	{ CCI_REG8(0x0345), 0xC8 },
-	{ CCI_REG8(0x0346), 0x00 },	/* Y_ADD_STA = 152 */
+	{ CCI_REG8(0x0346), 0x00 }, /* Y_ADD_STA = 152 */
 	{ CCI_REG8(0x0347), 0x98 },
-	{ CCI_REG8(0x0348), 0x0C },	/* X_ADD_END = 3079 */
+	{ CCI_REG8(0x0348), 0x0C }, /* X_ADD_END = 3079 */
 	{ CCI_REG8(0x0349), 0x07 },
-	{ CCI_REG8(0x034A), 0x09 },	/* Y_ADD_END = 2311 */
+	{ CCI_REG8(0x034A), 0x09 }, /* Y_ADD_END = 2311 */
 	{ CCI_REG8(0x034B), 0x07 },
-	{ CCI_REG8(0x034C), 0x05 },	/* X_OUT_SIZE = 1440 */
+	{ CCI_REG8(0x034C), 0x05 }, /* X_OUT_SIZE = 1440 */
 	{ CCI_REG8(0x034D), 0xA0 },
-	{ CCI_REG8(0x034E), 0x04 },	/* Y_OUT_SIZE = 1080 */
+	{ CCI_REG8(0x034E), 0x04 }, /* Y_OUT_SIZE = 1080 */
 	{ CCI_REG8(0x034F), 0x38 },
-	{ CCI_REG8(0x0340), 0x04 },	/* FLL = 1265 */
+	{ CCI_REG8(0x0340), 0x04 }, /* FLL = 1265 */
 	{ CCI_REG8(0x0341), 0xF1 },
-	{ CCI_REG8(0x0900), 0x01 },	/* BINNING_MODE = on */
-	{ CCI_REG8(0x0901), 0x22 },	/* BINNING_TYPE = 2x2 */
-	{ CCI_REG8(0x0387), 0x03 },	/* Y_ODD_INC */
-	{ CCI_REG8(0x3906), 0x7E },	/* Vendor */
+	{ CCI_REG8(0x0900), 0x01 }, /* BINNING_MODE = on */
+	{ CCI_REG8(0x0901), 0x22 }, /* BINNING_TYPE = 2x2 */
+	{ CCI_REG8(0x0387), 0x03 }, /* Y_ODD_INC */
+	{ CCI_REG8(0x3906), 0x7E }, /* Vendor */
 };
 
 /* Mode 3: 816x612 @90fps — 4x4 binning */
 static const struct cci_reg_sequence s5k4h7yx_mode_816x612_regs[] = {
-	{ CCI_REG8(0x0344), 0x00 },	/* X_ADD_STA = 8 */
+	{ CCI_REG8(0x0344), 0x00 }, /* X_ADD_STA = 8 */
 	{ CCI_REG8(0x0345), 0x08 },
-	{ CCI_REG8(0x0346), 0x00 },	/* Y_ADD_STA = 8 */
+	{ CCI_REG8(0x0346), 0x00 }, /* Y_ADD_STA = 8 */
 	{ CCI_REG8(0x0347), 0x08 },
-	{ CCI_REG8(0x0348), 0x0C },	/* X_ADD_END = 3271 */
+	{ CCI_REG8(0x0348), 0x0C }, /* X_ADD_END = 3271 */
 	{ CCI_REG8(0x0349), 0xC7 },
-	{ CCI_REG8(0x034A), 0x09 },	/* Y_ADD_END = 2455 */
+	{ CCI_REG8(0x034A), 0x09 }, /* Y_ADD_END = 2455 */
 	{ CCI_REG8(0x034B), 0x97 },
-	{ CCI_REG8(0x034C), 0x03 },	/* X_OUT_SIZE = 816 */
+	{ CCI_REG8(0x034C), 0x03 }, /* X_OUT_SIZE = 816 */
 	{ CCI_REG8(0x034D), 0x30 },
-	{ CCI_REG8(0x034E), 0x02 },	/* Y_OUT_SIZE = 612 */
+	{ CCI_REG8(0x034E), 0x02 }, /* Y_OUT_SIZE = 612 */
 	{ CCI_REG8(0x034F), 0x64 },
-	{ CCI_REG8(0x0340), 0x03 },	/* FLL = 843 */
+	{ CCI_REG8(0x0340), 0x03 }, /* FLL = 843 */
 	{ CCI_REG8(0x0341), 0x4B },
-	{ CCI_REG8(0x0900), 0x01 },	/* BINNING_MODE = on */
-	{ CCI_REG8(0x0901), 0x44 },	/* BINNING_TYPE = 4x4 */
-	{ CCI_REG8(0x0387), 0x07 },	/* Y_ODD_INC */
-	{ CCI_REG8(0x3906), 0x7E },	/* Vendor */
+	{ CCI_REG8(0x0900), 0x01 }, /* BINNING_MODE = on */
+	{ CCI_REG8(0x0901), 0x44 }, /* BINNING_TYPE = 4x4 */
+	{ CCI_REG8(0x0387), 0x07 }, /* Y_ODD_INC */
+	{ CCI_REG8(0x3906), 0x7E }, /* Vendor */
 };
 
 /* Mode 4: 752x564 @120fps — 4x4 binning, center crop */
 static const struct cci_reg_sequence s5k4h7yx_mode_752x564_regs[] = {
-	{ CCI_REG8(0x0344), 0x00 },	/* X_ADD_STA = 136 */
+	{ CCI_REG8(0x0344), 0x00 }, /* X_ADD_STA = 136 */
 	{ CCI_REG8(0x0345), 0x88 },
-	{ CCI_REG8(0x0346), 0x00 },	/* Y_ADD_STA = 104 */
+	{ CCI_REG8(0x0346), 0x00 }, /* Y_ADD_STA = 104 */
 	{ CCI_REG8(0x0347), 0x68 },
-	{ CCI_REG8(0x0348), 0x0C },	/* X_ADD_END = 3143 */
+	{ CCI_REG8(0x0348), 0x0C }, /* X_ADD_END = 3143 */
 	{ CCI_REG8(0x0349), 0x47 },
-	{ CCI_REG8(0x034A), 0x09 },	/* Y_ADD_END = 2359 */
+	{ CCI_REG8(0x034A), 0x09 }, /* Y_ADD_END = 2359 */
 	{ CCI_REG8(0x034B), 0x37 },
-	{ CCI_REG8(0x034C), 0x02 },	/* X_OUT_SIZE = 752 */
+	{ CCI_REG8(0x034C), 0x02 }, /* X_OUT_SIZE = 752 */
 	{ CCI_REG8(0x034D), 0xF0 },
-	{ CCI_REG8(0x034E), 0x02 },	/* Y_OUT_SIZE = 564 */
+	{ CCI_REG8(0x034E), 0x02 }, /* Y_OUT_SIZE = 564 */
 	{ CCI_REG8(0x034F), 0x34 },
-	{ CCI_REG8(0x0340), 0x02 },	/* FLL = 632 */
+	{ CCI_REG8(0x0340), 0x02 }, /* FLL = 632 */
 	{ CCI_REG8(0x0341), 0x78 },
-	{ CCI_REG8(0x0900), 0x01 },	/* BINNING_MODE = on */
-	{ CCI_REG8(0x0901), 0x44 },	/* BINNING_TYPE = 4x4 */
-	{ CCI_REG8(0x0387), 0x07 },	/* Y_ODD_INC */
-	{ CCI_REG8(0x3906), 0x7E },	/* Vendor */
+	{ CCI_REG8(0x0900), 0x01 }, /* BINNING_MODE = on */
+	{ CCI_REG8(0x0901), 0x44 }, /* BINNING_TYPE = 4x4 */
+	{ CCI_REG8(0x0387), 0x07 }, /* Y_ODD_INC */
+	{ CCI_REG8(0x3906), 0x7E }, /* Vendor */
 };
 
 /* --- Mode definitions --- */
@@ -382,8 +385,7 @@ static u32 s5k4h7yx_get_format_code(const struct s5k4h7yx *s5k4h7yx)
 
 	lockdep_assert_held(&s5k4h7yx->mutex);
 
-	i = (s5k4h7yx->vflip->val ? 2 : 0) |
-	    (s5k4h7yx->hflip->val ? 1 : 0);
+	i = (s5k4h7yx->vflip->val ? 2 : 0) | (s5k4h7yx->hflip->val ? 1 : 0);
 
 	return s5k4h7yx_mbus_codes[i];
 }
@@ -433,9 +435,8 @@ static void s5k4h7yx_adjust_exposure_range(struct s5k4h7yx *s5k4h7yx)
 		       S5K4H7YX_EXPOSURE_OFFSET;
 	exposure_def = min(exposure_max, s5k4h7yx->exposure->val);
 	__v4l2_ctrl_modify_range(s5k4h7yx->exposure,
-				 s5k4h7yx->exposure->minimum,
-				 exposure_max, s5k4h7yx->exposure->step,
-				 exposure_def);
+				 s5k4h7yx->exposure->minimum, exposure_max,
+				 s5k4h7yx->exposure->step, exposure_def);
 }
 
 /* --- V4L2 control operations --- */
@@ -469,23 +470,22 @@ static int s5k4h7yx_set_ctrl(struct v4l2_ctrl *ctrl)
 				ctrl->val, NULL);
 		break;
 	case V4L2_CID_VBLANK:
-		ret = cci_write(s5k4h7yx->regmap,
-				S5K4H7YX_REG_FRM_LENGTH_LINES,
+		ret = cci_write(s5k4h7yx->regmap, S5K4H7YX_REG_FRM_LENGTH_LINES,
 				s5k4h7yx->cur_mode->height + ctrl->val, NULL);
 		break;
 	case V4L2_CID_VFLIP:
 	case V4L2_CID_HFLIP:
-		ret = cci_write(s5k4h7yx->regmap, S5K4H7YX_REG_ORIENTATION,
-				(s5k4h7yx->hflip->val ?
-				 S5K4H7YX_ORIENT_HFLIP : 0) |
-				(s5k4h7yx->vflip->val ?
-				 S5K4H7YX_ORIENT_VFLIP : 0),
-				NULL);
+		ret = cci_write(
+			s5k4h7yx->regmap, S5K4H7YX_REG_ORIENTATION,
+			(s5k4h7yx->hflip->val ? S5K4H7YX_ORIENT_HFLIP : 0) |
+				(s5k4h7yx->vflip->val ? S5K4H7YX_ORIENT_VFLIP :
+							0),
+			NULL);
 		break;
 	default:
 		dev_info(&client->dev,
-			 "ctrl(id:0x%x,val:0x%x) is not handled\n",
-			 ctrl->id, ctrl->val);
+			 "ctrl(id:0x%x,val:0x%x) is not handled\n", ctrl->id,
+			 ctrl->val);
 		ret = -EINVAL;
 		break;
 	}
@@ -501,8 +501,8 @@ static const struct v4l2_ctrl_ops s5k4h7yx_ctrl_ops = {
 
 /* --- Pad operations --- */
 static int s5k4h7yx_enum_mbus_code(struct v4l2_subdev *sd,
-				    struct v4l2_subdev_state *sd_state,
-				    struct v4l2_subdev_mbus_code_enum *code)
+				   struct v4l2_subdev_state *sd_state,
+				   struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct s5k4h7yx *s5k4h7yx = to_s5k4h7yx(sd);
 
@@ -515,8 +515,8 @@ static int s5k4h7yx_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int s5k4h7yx_enum_frame_size(struct v4l2_subdev *sd,
-				     struct v4l2_subdev_state *sd_state,
-				     struct v4l2_subdev_frame_size_enum *fse)
+				    struct v4l2_subdev_state *sd_state,
+				    struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct s5k4h7yx *s5k4h7yx = to_s5k4h7yx(sd);
 
@@ -535,8 +535,8 @@ static int s5k4h7yx_enum_frame_size(struct v4l2_subdev *sd,
 }
 
 static void s5k4h7yx_update_pad_format(struct s5k4h7yx *s5k4h7yx,
-					const struct s5k4h7yx_mode *mode,
-					struct v4l2_subdev_format *fmt)
+				       const struct s5k4h7yx_mode *mode,
+				       struct v4l2_subdev_format *fmt)
 {
 	fmt->format.width = mode->width;
 	fmt->format.height = mode->height;
@@ -545,12 +545,11 @@ static void s5k4h7yx_update_pad_format(struct s5k4h7yx *s5k4h7yx,
 }
 
 static int __s5k4h7yx_get_pad_format(struct s5k4h7yx *s5k4h7yx,
-				      struct v4l2_subdev_state *sd_state,
-				      struct v4l2_subdev_format *fmt)
+				     struct v4l2_subdev_state *sd_state,
+				     struct v4l2_subdev_format *fmt)
 {
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY)
-		fmt->format = *v4l2_subdev_state_get_format(sd_state,
-							    fmt->pad);
+		fmt->format = *v4l2_subdev_state_get_format(sd_state, fmt->pad);
 	else
 		s5k4h7yx_update_pad_format(s5k4h7yx, s5k4h7yx->cur_mode, fmt);
 
@@ -558,8 +557,8 @@ static int __s5k4h7yx_get_pad_format(struct s5k4h7yx *s5k4h7yx,
 }
 
 static int s5k4h7yx_get_pad_format(struct v4l2_subdev *sd,
-				    struct v4l2_subdev_state *sd_state,
-				    struct v4l2_subdev_format *fmt)
+				   struct v4l2_subdev_state *sd_state,
+				   struct v4l2_subdev_format *fmt)
 {
 	struct s5k4h7yx *s5k4h7yx = to_s5k4h7yx(sd);
 	int ret;
@@ -572,8 +571,8 @@ static int s5k4h7yx_get_pad_format(struct v4l2_subdev *sd,
 }
 
 static int s5k4h7yx_set_pad_format(struct v4l2_subdev *sd,
-				    struct v4l2_subdev_state *sd_state,
-				    struct v4l2_subdev_format *fmt)
+				   struct v4l2_subdev_state *sd_state,
+				   struct v4l2_subdev_format *fmt)
 {
 	struct s5k4h7yx *s5k4h7yx = to_s5k4h7yx(sd);
 	struct v4l2_mbus_framefmt *framefmt;
@@ -589,16 +588,16 @@ static int s5k4h7yx_set_pad_format(struct v4l2_subdev *sd,
 	fmt->format.code = s5k4h7yx_get_format_code(s5k4h7yx);
 
 	mode = v4l2_find_nearest_size(s5k4h7yx_supported_modes,
-		ARRAY_SIZE(s5k4h7yx_supported_modes), width, height,
-		fmt->format.width, fmt->format.height);
+				      ARRAY_SIZE(s5k4h7yx_supported_modes),
+				      width, height, fmt->format.width,
+				      fmt->format.height);
 	s5k4h7yx_update_pad_format(s5k4h7yx, mode, fmt);
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
 		framefmt = v4l2_subdev_state_get_format(sd_state, fmt->pad);
 		*framefmt = fmt->format;
 	} else {
 		s5k4h7yx->cur_mode = mode;
-		__v4l2_ctrl_s_ctrl(s5k4h7yx->link_freq,
-				   mode->link_freq_index);
+		__v4l2_ctrl_s_ctrl(s5k4h7yx->link_freq, mode->link_freq_index);
 
 		link_freq = s5k4h7yx_link_freq_menu[mode->link_freq_index];
 		pixel_rate = s5k4h7yx_link_freq_to_pixel_rate(link_freq);
@@ -607,14 +606,13 @@ static int s5k4h7yx_set_pad_format(struct v4l2_subdev *sd,
 
 		vblank_def = mode->vts_def - mode->height;
 		vblank_min = mode->vts_min - mode->height;
-		__v4l2_ctrl_modify_range(
-			s5k4h7yx->vblank, vblank_min,
-			S5K4H7YX_VTS_MAX - mode->height, 1,
-			vblank_def);
+		__v4l2_ctrl_modify_range(s5k4h7yx->vblank, vblank_min,
+					 S5K4H7YX_VTS_MAX - mode->height, 1,
+					 vblank_def);
 		__v4l2_ctrl_s_ctrl(s5k4h7yx->vblank, vblank_def);
 		h_blank = mode->llp - mode->width;
-		__v4l2_ctrl_modify_range(s5k4h7yx->hblank, h_blank,
-					 h_blank, 1, h_blank);
+		__v4l2_ctrl_modify_range(s5k4h7yx->hblank, h_blank, h_blank, 1,
+					 h_blank);
 	}
 
 	mutex_unlock(&s5k4h7yx->mutex);
@@ -624,8 +622,8 @@ static int s5k4h7yx_set_pad_format(struct v4l2_subdev *sd,
 
 static const struct v4l2_rect *
 __s5k4h7yx_get_pad_crop(struct s5k4h7yx *s5k4h7yx,
-			struct v4l2_subdev_state *sd_state,
-			unsigned int pad, enum v4l2_subdev_format_whence which)
+			struct v4l2_subdev_state *sd_state, unsigned int pad,
+			enum v4l2_subdev_format_whence which)
 {
 	switch (which) {
 	case V4L2_SUBDEV_FORMAT_TRY:
@@ -646,8 +644,8 @@ static int s5k4h7yx_get_selection(struct v4l2_subdev *sd,
 		struct s5k4h7yx *s5k4h7yx = to_s5k4h7yx(sd);
 
 		mutex_lock(&s5k4h7yx->mutex);
-		sel->r = *__s5k4h7yx_get_pad_crop(s5k4h7yx, sd_state,
-						   sel->pad, sel->which);
+		sel->r = *__s5k4h7yx_get_pad_crop(s5k4h7yx, sd_state, sel->pad,
+						  sel->which);
 		mutex_unlock(&s5k4h7yx->mutex);
 
 		return 0;
@@ -762,27 +760,25 @@ static int s5k4h7yx_power_on(struct device *dev)
 	struct s5k4h7yx *s5k4h7yx = to_s5k4h7yx(sd);
 	int ret;
 
-	ret = regulator_bulk_enable(S5K4H7YX_NUM_SUPPLIES,
-				    s5k4h7yx->supplies);
+	ret = regulator_bulk_enable(S5K4H7YX_NUM_SUPPLIES, s5k4h7yx->supplies);
 	if (ret) {
 		dev_err(dev, "%s: failed to enable regulators\n", __func__);
 		return ret;
 	}
 
-	/* Deassert reset */
-	gpiod_set_value_cansleep(s5k4h7yx->reset_gpio, 0);
+	fsleep(1000);
 
 	ret = clk_prepare_enable(s5k4h7yx->clk);
 	if (ret) {
 		dev_err(dev, "failed to enable clock\n");
-		gpiod_set_value_cansleep(s5k4h7yx->reset_gpio, 1);
 		regulator_bulk_disable(S5K4H7YX_NUM_SUPPLIES,
 				       s5k4h7yx->supplies);
 		return ret;
 	}
 
-	/* Sensor needs time after clock enable before first I2C */
-	fsleep(1000);
+	gpiod_set_value_cansleep(s5k4h7yx->reset_gpio, 0);
+
+	fsleep(12000);
 
 	return 0;
 }
@@ -792,10 +788,9 @@ static int s5k4h7yx_power_off(struct device *dev)
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct s5k4h7yx *s5k4h7yx = to_s5k4h7yx(sd);
 
-	clk_disable_unprepare(s5k4h7yx->clk);
-
-	/* Assert reset */
 	gpiod_set_value_cansleep(s5k4h7yx->reset_gpio, 1);
+
+	clk_disable_unprepare(s5k4h7yx->clk);
 
 	regulator_bulk_disable(S5K4H7YX_NUM_SUPPLIES, s5k4h7yx->supplies);
 
@@ -847,9 +842,8 @@ static const struct v4l2_subdev_internal_ops s5k4h7yx_internal_ops = {
 	.open = s5k4h7yx_open,
 };
 
-static const struct dev_pm_ops s5k4h7yx_pm_ops = {
-	SET_RUNTIME_PM_OPS(s5k4h7yx_power_off, s5k4h7yx_power_on, NULL)
-};
+static const struct dev_pm_ops s5k4h7yx_pm_ops = { SET_RUNTIME_PM_OPS(
+	s5k4h7yx_power_off, s5k4h7yx_power_on, NULL) };
 
 /* --- Controls init --- */
 static int s5k4h7yx_init_controls(struct s5k4h7yx *s5k4h7yx)
@@ -871,71 +865,67 @@ static int s5k4h7yx_init_controls(struct s5k4h7yx *s5k4h7yx)
 	mutex_init(&s5k4h7yx->mutex);
 	ctrl_hdlr->lock = &s5k4h7yx->mutex;
 
-	s5k4h7yx->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr,
-				&s5k4h7yx_ctrl_ops,
-				V4L2_CID_LINK_FREQ,
-				ARRAY_SIZE(s5k4h7yx_link_freq_menu) - 1,
-				0, s5k4h7yx_link_freq_menu);
+	s5k4h7yx->link_freq = v4l2_ctrl_new_int_menu(
+		ctrl_hdlr, &s5k4h7yx_ctrl_ops, V4L2_CID_LINK_FREQ,
+		ARRAY_SIZE(s5k4h7yx_link_freq_menu) - 1, 0,
+		s5k4h7yx_link_freq_menu);
 	if (s5k4h7yx->link_freq)
 		s5k4h7yx->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	s5k4h7yx->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4h7yx_ctrl_ops,
-					     V4L2_CID_HFLIP, 0, 1, 1, 0);
+					    V4L2_CID_HFLIP, 0, 1, 1, 0);
 	if (s5k4h7yx->hflip)
 		s5k4h7yx->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
 
 	s5k4h7yx->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4h7yx_ctrl_ops,
-					     V4L2_CID_VFLIP, 0, 1, 1, 0);
+					    V4L2_CID_VFLIP, 0, 1, 1, 0);
 	if (s5k4h7yx->vflip)
 		s5k4h7yx->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
 
 	pixel_rate = s5k4h7yx_link_freq_to_pixel_rate(
-			s5k4h7yx_link_freq_menu[s5k4h7yx->cur_mode->link_freq_index]);
+		s5k4h7yx_link_freq_menu[s5k4h7yx->cur_mode->link_freq_index]);
 
-	s5k4h7yx->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr,
-				&s5k4h7yx_ctrl_ops,
-				V4L2_CID_PIXEL_RATE,
-				pixel_rate, pixel_rate, 1, pixel_rate);
+	s5k4h7yx->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4h7yx_ctrl_ops,
+						 V4L2_CID_PIXEL_RATE,
+						 pixel_rate, pixel_rate, 1,
+						 pixel_rate);
 
 	vblank_def = s5k4h7yx->cur_mode->vts_def - s5k4h7yx->cur_mode->height;
 	vblank_min = s5k4h7yx->cur_mode->vts_min - s5k4h7yx->cur_mode->height;
-	s5k4h7yx->vblank = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4h7yx_ctrl_ops,
-				V4L2_CID_VBLANK, vblank_min,
-				S5K4H7YX_VTS_MAX - s5k4h7yx->cur_mode->height,
-				1, vblank_def);
+	s5k4h7yx->vblank = v4l2_ctrl_new_std(
+		ctrl_hdlr, &s5k4h7yx_ctrl_ops, V4L2_CID_VBLANK, vblank_min,
+		S5K4H7YX_VTS_MAX - s5k4h7yx->cur_mode->height, 1, vblank_def);
 
 	h_blank = s5k4h7yx->cur_mode->llp - s5k4h7yx->cur_mode->width;
 	s5k4h7yx->hblank = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4h7yx_ctrl_ops,
-				V4L2_CID_HBLANK, h_blank, h_blank, 1, h_blank);
+					     V4L2_CID_HBLANK, h_blank, h_blank,
+					     1, h_blank);
 	if (s5k4h7yx->hblank)
 		s5k4h7yx->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
-	s5k4h7yx->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4h7yx_ctrl_ops,
-				V4L2_CID_EXPOSURE, S5K4H7YX_EXPOSURE_MIN,
-				S5K4H7YX_VTS_MAX - S5K4H7YX_EXPOSURE_OFFSET,
-				S5K4H7YX_EXPOSURE_STEP,
-				S5K4H7YX_EXPOSURE_DEFAULT);
+	s5k4h7yx->exposure = v4l2_ctrl_new_std(
+		ctrl_hdlr, &s5k4h7yx_ctrl_ops, V4L2_CID_EXPOSURE,
+		S5K4H7YX_EXPOSURE_MIN,
+		S5K4H7YX_VTS_MAX - S5K4H7YX_EXPOSURE_OFFSET,
+		S5K4H7YX_EXPOSURE_STEP, S5K4H7YX_EXPOSURE_DEFAULT);
 
-	v4l2_ctrl_new_std(ctrl_hdlr, &s5k4h7yx_ctrl_ops,
-			  V4L2_CID_ANALOGUE_GAIN,
+	v4l2_ctrl_new_std(ctrl_hdlr, &s5k4h7yx_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
 			  S5K4H7YX_ANA_GAIN_MIN, S5K4H7YX_ANA_GAIN_MAX,
 			  S5K4H7YX_ANA_GAIN_STEP, S5K4H7YX_ANA_GAIN_DEFAULT);
 
-	v4l2_ctrl_new_std(ctrl_hdlr, &s5k4h7yx_ctrl_ops,
-			  V4L2_CID_DIGITAL_GAIN,
+	v4l2_ctrl_new_std(ctrl_hdlr, &s5k4h7yx_ctrl_ops, V4L2_CID_DIGITAL_GAIN,
 			  S5K4H7YX_DGTL_GAIN_MIN, S5K4H7YX_DGTL_GAIN_MAX,
-			  S5K4H7YX_DGTL_GAIN_STEP,
-			  S5K4H7YX_DGTL_GAIN_DEFAULT);
+			  S5K4H7YX_DGTL_GAIN_STEP, S5K4H7YX_DGTL_GAIN_DEFAULT);
 
 	v4l2_ctrl_new_std_menu_items(ctrl_hdlr, &s5k4h7yx_ctrl_ops,
-				V4L2_CID_TEST_PATTERN,
-				ARRAY_SIZE(s5k4h7yx_test_pattern_menu) - 1,
-				0, 0, s5k4h7yx_test_pattern_menu);
+				     V4L2_CID_TEST_PATTERN,
+				     ARRAY_SIZE(s5k4h7yx_test_pattern_menu) - 1,
+				     0, 0, s5k4h7yx_test_pattern_menu);
 
 	if (ctrl_hdlr->error) {
 		ret = ctrl_hdlr->error;
-		dev_err(&client->dev, "%s control init failed (%d)\n",
-			__func__, ret);
+		dev_err(&client->dev, "%s control init failed (%d)\n", __func__,
+			ret);
 		goto error;
 	}
 
@@ -967,15 +957,14 @@ static void s5k4h7yx_free_controls(struct s5k4h7yx *s5k4h7yx)
 
 /* --- Regulators --- */
 static int s5k4h7yx_get_regulators(struct s5k4h7yx *s5k4h7yx,
-				    struct i2c_client *client)
+				   struct i2c_client *client)
 {
 	unsigned int i;
 
 	for (i = 0; i < S5K4H7YX_NUM_SUPPLIES; i++)
 		s5k4h7yx->supplies[i].supply = s5k4h7yx_supply_name[i];
 
-	return devm_regulator_bulk_get(&client->dev,
-				       S5K4H7YX_NUM_SUPPLIES,
+	return devm_regulator_bulk_get(&client->dev, S5K4H7YX_NUM_SUPPLIES,
 				       s5k4h7yx->supplies);
 }
 
@@ -984,9 +973,7 @@ static int s5k4h7yx_probe(struct i2c_client *client)
 {
 	struct s5k4h7yx *s5k4h7yx;
 	struct fwnode_handle *endpoint;
-	struct v4l2_fwnode_endpoint ep = {
-		.bus_type = V4L2_MBUS_CSI2_DPHY
-	};
+	struct v4l2_fwnode_endpoint ep = { .bus_type = V4L2_MBUS_CSI2_DPHY };
 	int ret;
 	u32 val = 0;
 
@@ -1007,8 +994,8 @@ static int s5k4h7yx_probe(struct i2c_client *client)
 				     "failed to get regulators\n");
 
 	/* Reset GPIO (active low) */
-	s5k4h7yx->reset_gpio = devm_gpiod_get_optional(&client->dev, "reset",
-							GPIOD_OUT_HIGH);
+	s5k4h7yx->reset_gpio =
+		devm_gpiod_get_optional(&client->dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(s5k4h7yx->reset_gpio))
 		return dev_err_probe(&client->dev,
 				     PTR_ERR(s5k4h7yx->reset_gpio),
@@ -1033,8 +1020,8 @@ static int s5k4h7yx_probe(struct i2c_client *client)
 		return -EINVAL;
 	}
 
-	endpoint = fwnode_graph_get_next_endpoint(dev_fwnode(&client->dev),
-						  NULL);
+	endpoint =
+		fwnode_graph_get_next_endpoint(dev_fwnode(&client->dev), NULL);
 	if (!endpoint) {
 		dev_err(&client->dev, "Endpoint node not found\n");
 		return -EINVAL;
@@ -1047,8 +1034,7 @@ static int s5k4h7yx_probe(struct i2c_client *client)
 		return ret;
 	}
 
-	ret = v4l2_link_freq_to_bitmap(&client->dev,
-				       ep.link_frequencies,
+	ret = v4l2_link_freq_to_bitmap(&client->dev, ep.link_frequencies,
 				       ep.nr_of_link_frequencies,
 				       s5k4h7yx_link_freq_menu,
 				       ARRAY_SIZE(s5k4h7yx_link_freq_menu),
@@ -1093,8 +1079,7 @@ static int s5k4h7yx_probe(struct i2c_client *client)
 	/* Initialize source pad */
 	s5k4h7yx->pad.flags = MEDIA_PAD_FL_SOURCE;
 
-	ret = media_entity_pads_init(&s5k4h7yx->sd.entity, 1,
-				     &s5k4h7yx->pad);
+	ret = media_entity_pads_init(&s5k4h7yx->sd.entity, 1, &s5k4h7yx->pad);
 	if (ret)
 		goto error_handler_free;
 
