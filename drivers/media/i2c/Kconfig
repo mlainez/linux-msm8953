@@ -792,6 +792,20 @@ config VIDEO_S5K4H7YX
 	  To compile this driver as a module, choose M here: the
 	  module will be called s5k4h7yx.
 
+config VIDEO_S5KGM1SP
+	tristate "Samsung S5KGM1SP sensor support"
+	depends on I2C && VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_CCI_I2C
+	select V4L2_FWNODE
+	help
+	  This is a V4L2 sensor driver for Samsung S5KGM1SP (ISOCELL GM1)
+	  48MP raw camera sensor.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5kgm1sp.
+
 config VIDEO_S5K5BAF
 	tristate "Samsung S5K5BAF sensor support"
 	help
