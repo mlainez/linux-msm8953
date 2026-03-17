@@ -316,8 +316,6 @@
 
 	/* FP3 does not use the codec on PM8953 */
 	/delete-property/ audio-routing;
-	/delete-node/ primary-mi2s-dai-link;
-	/delete-node/ tertiary-mi2s-dai-link;
 
 	audio-routing = "RX_BIAS", "MCLK",
 			"AMIC2", "MIC BIAS2",
@@ -326,6 +324,9 @@
 			"MIC BIAS1", "Digital Mic1",
 			"DMIC2", "MIC BIAS3",
 			"MIC BIAS3", "Digital Mic2";
+
+	/delete-node/ primary-mi2s-dai-link;
+	/delete-node/ tertiary-mi2s-dai-link;
 
 	quinary-mi2s-dai-link {
 		link-name = "Quinary MI2S";
