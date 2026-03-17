@@ -806,6 +806,20 @@ config VIDEO_S5KGM1SP
 	  To compile this driver as a module, choose M here: the
 	  module will be called s5kgm1sp.
 
+config VIDEO_S5K3P9SP
+	tristate "Samsung S5K3P9SP sensor support"
+	depends on I2C && VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_CCI_I2C
+	select V4L2_FWNODE
+	help
+	  This is a V4L2 sensor driver for Samsung S5K3P9SP (ISOCELL 3P9)
+	  16MP raw camera sensor.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5k3p9sp.
+
 config VIDEO_S5K5BAF
 	tristate "Samsung S5K5BAF sensor support"
 	help
