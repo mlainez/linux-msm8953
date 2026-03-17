@@ -133,6 +133,7 @@ obj-$(CONFIG_VIDEO_SIMPLE_LENS) += simple-lens.o
 obj-$(CONFIG_VIDEO_S5C73M3) += s5c73m3/
 obj-$(CONFIG_VIDEO_S5K2XX) += s5k2xx.o
 obj-$(CONFIG_VIDEO_S5K3M5) += s5k3m5.o
+obj-$(CONFIG_VIDEO_S5K3P9SP) += s5k3p9sp.o
 obj-$(CONFIG_VIDEO_S5K4H7YX) += s5k4h7yx.o
 obj-$(CONFIG_VIDEO_S5KGM1SP) += s5kgm1sp.o
 obj-$(CONFIG_VIDEO_S5K5BAF) += s5k5baf.o
