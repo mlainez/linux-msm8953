@@ -5,6 +5,7 @@
 /dts-v1/;
 
 #include <dt-bindings/leds/common.h>
+#include <dt-bindings/sound/qcom,wcd9335.h>
 #include "sdm632.dtsi"
 #include "pm8953.dtsi"
 #include "pmi632.dtsi"
@@ -121,6 +122,53 @@
 	firmware-name = "qcom/msm8953/fairphone/fp3/adsp.mbn";
 
 	status = "okay";
+};
+
+&slim_msm {
+	status = "okay";
+
+	slim@1 {
+		reg = <1>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		tasha_ifd: tas-ifd@0,0 {
+			compatible = "slim217,1a0";
+			reg = <0 0>;
+		};
+
+		wcd9335: codec@1,0 {
+			compatible = "slim217,1a0";
+			reg = <1 0>;
+
+			clock-names = "mclk", "slimbus";
+			clocks = <&rpmcc RPM_SMD_DIV_CLK2>,
+				 <&rpmcc RPM_SMD_BB_CLK1>;
+
+			interrupt-parent = <&tlmm>;
+			interrupts = <73 IRQ_TYPE_LEVEL_HIGH>,
+				     <73 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "intr1", "intr2";
+			interrupt-controller;
+			#interrupt-cells = <1>;
+
+			pinctrl-0 = <&wcd_reset_active &wcd_intr_default>;
+			pinctrl-names = "default";
+
+			reset-gpios = <&tlmm 67 GPIO_ACTIVE_LOW>;
+			slim-ifc-dev = <&tasha_ifd>;
+
+			#sound-dai-cells = <1>;
+
+			vdd-buck-supply = <&pm8953_l5>;
+			vdd-buck-sido-supply = <&pm8953_l5>;
+			vdd-rx-supply = <&pm8953_l5>;
+			vdd-tx-supply = <&pm8953_l5>;
+			vdd-io-supply = <&pm8953_l5>;
+			vdd-vbat-supply = <&vph_pwr>;
+			vdd-micbias-supply = <&pm8953_l13>;
+		};
+	};
 };
 
 &mdss {
@@ -271,6 +319,14 @@
 	/delete-node/ primary-mi2s-dai-link;
 	/delete-node/ tertiary-mi2s-dai-link;
 
+	audio-routing = "RX_BIAS", "MCLK",
+			"AMIC2", "MIC BIAS2",
+			"MIC BIAS2", "Headset Mic",
+			"DMIC1", "MIC BIAS1",
+			"MIC BIAS1", "Digital Mic1",
+			"DMIC2", "MIC BIAS3",
+			"MIC BIAS3", "Digital Mic2";
+
 	quinary-mi2s-dai-link {
 		link-name = "Quinary MI2S";
 
@@ -284,6 +340,38 @@
 
 		platform {
 			sound-dai = <&q6routing>;
+		};
+	};
+
+	slim-dai-link {
+		link-name = "SLIM Playback";
+
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_0_RX>;
+		};
+
+		platform {
+			sound-dai = <&q6routing>;
+		};
+
+		codec {
+			sound-dai = <&wcd9335 AIF1_PB>;
+		};
+	};
+
+	slimcap-dai-link {
+		link-name = "SLIM Capture";
+
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_0_TX>;
+		};
+
+		platform {
+			sound-dai = <&q6routing>;
+		};
+
+		codec {
+			sound-dai = <&wcd9335 AIF1_CAP>;
 		};
 	};
 };
@@ -436,6 +524,20 @@
 	quin_mi2s_ws_sleep: quin-mi2s-ws-sleep-state {
 		pins = "gpio92";
 		function = "pri_mi2s_ws";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	wcd_reset_active: wcd-reset-active-state {
+		pins = "gpio67";
+		function = "gpio";
+		drive-strength = <8>;
+		output-high;
+	};
+
+	wcd_intr_default: wcd-intr-default-state {
+		pins = "gpio73";
+		function = "gpio";
 		drive-strength = <2>;
 		bias-pull-down;
 	};
