@@ -100,9 +100,22 @@ static const char *const s5k3p9sp_test_pattern_menu[] = {
 	"PN9",
 };
 
+/*
+ * Advertised link frequencies.  The sensor PLL is configured via register
+ * writes and actually produces 366 MHz (full-res) and 348 MHz (binned).
+ * We report slightly inflated values (≥ 381 MHz) so that the Qualcomm
+ * CSIPHY driver selects a 200 MHz timer source (GPLL0, SRC_SEL 1) instead
+ * of 100 MHz (GPLL0_DIV2, SRC_SEL 2) which is non-functional on MSM8953.
+ */
 static const s64 s5k3p9sp_link_freq_menu[] = {
-	366000000LL, /* 24 * 122 / 4 / 2 — full res */
-	348000000LL, /* 24 * 116 / 4 / 2 — binned */
+	400000000LL, /* reported to CSIPHY — real PLL rate is 366 MHz */
+	384000000LL, /* reported to CSIPHY — real PLL rate is 348 MHz */
+};
+
+/* Actual link frequencies produced by the sensor PLL */
+static const u64 s5k3p9sp_real_link_freq[] = {
+	366000000ULL, /* 24 * 122 / 4 / 2 — full res */
+	348000000ULL, /* 24 * 116 / 4 / 2 — binned */
 };
 
 #define REGS(_list)                               \
@@ -121,9 +134,9 @@ static const s64 s5k3p9sp_link_freq_menu[] = {
 		.regs = _list,                        \
 	}
 
-static u64 s5k3p9sp_link_freq_to_pixel_rate(u64 link_freq)
+static u64 s5k3p9sp_link_freq_to_pixel_rate(unsigned int freq_index)
 {
-	return div_u64(link_freq * 2 * 4, 10);
+	return div_u64(s5k3p9sp_real_link_freq[freq_index] * 2 * 4, 10);
 }
 
 #include "s5k3p9sp_regs.h"
@@ -411,7 +424,7 @@ static int s5k3p9sp_set_pad_format(struct v4l2_subdev *sd,
 	struct v4l2_mbus_framefmt *framefmt;
 	const struct s5k3p9sp_mode *mode;
 	s32 vblank_def, vblank_min;
-	s64 h_blank, pixel_rate, link_freq;
+	s64 h_blank, pixel_rate;
 
 	mutex_lock(&sensor->mutex);
 
@@ -430,8 +443,8 @@ static int s5k3p9sp_set_pad_format(struct v4l2_subdev *sd,
 		sensor->cur_mode = mode;
 		__v4l2_ctrl_s_ctrl(sensor->link_freq, mode->link_freq_index);
 
-		link_freq = s5k3p9sp_link_freq_menu[mode->link_freq_index];
-		pixel_rate = s5k3p9sp_link_freq_to_pixel_rate(link_freq);
+		pixel_rate =
+			s5k3p9sp_link_freq_to_pixel_rate(mode->link_freq_index);
 		__v4l2_ctrl_modify_range(sensor->pixel_rate, pixel_rate,
 					 pixel_rate, 1, pixel_rate);
 
@@ -626,7 +639,7 @@ static int s5k3p9sp_init_controls(struct s5k3p9sp *sensor)
 		sensor->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	pixel_rate = s5k3p9sp_link_freq_to_pixel_rate(
-		s5k3p9sp_link_freq_menu[sensor->cur_mode->link_freq_index]);
+		sensor->cur_mode->link_freq_index);
 
 	sensor->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &s5k3p9sp_ctrl_ops,
 					       V4L2_CID_PIXEL_RATE, pixel_rate,
