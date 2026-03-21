@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 /*
  * Copyright (c) 2022, Luca Weiss <luca@z3ntu.xyz>
+ * Copyright (c) 2025, Marc Lainez <marc.lainez@gmail.com>
+ *
+ * Device tree for Fairphone 3+ (FP3+).
+ *
+ * The FP3+ is a hardware revision of the Fairphone 3 with upgraded
+ * camera modules (Samsung S5KGM1SP rear + Samsung S5K3P9SP front,
+ * replacing Sony IMX363 + Samsung S5K4H7YX on FP3).
  */
 /dts-v1/;
 
@@ -10,8 +17,8 @@
 #include "pmi632.dtsi"
 
 / {
-	model = "Fairphone 3";
-	compatible = "fairphone,fp3", "qcom,sdm632";
+	model = "Fairphone 3+";
+	compatible = "fairphone,fp3p", "fairphone,fp3", "qcom,sdm632";
 	chassis-type = "handset";
 	qcom,msm-id = <349 0>;
 	qcom,board-id = <8 0x10000>;
@@ -83,31 +90,6 @@
 		enable-active-high;
 		startup-delay-us = <200>;
 	};
-
-	battery: battery {
-		compatible = "simple-battery";
-		voltage-min-design-microvolt = <3400000>;
-		voltage-max-design-microvolt = <4390000>;
-		energy-full-design-microwatt-hours = <11400000>;
-		charge-full-design-microamp-hours = <3000000>;
-
-		ocv-capacity-celsius = <25>;
-		ocv-capacity-table-0 = <4370000 100>, <4337400 98>, <4307400 96>,
-			<4280600 94>, <4256600 92>, <4233100 90>, <4209700 88>,
-			<4186700 86>, <4164000 84>, <4141700 82>, <4120000 80>,
-			<4099000 78>, <4078600 76>, <4058700 74>, <4039300 72>,
-			<4021400 70>, <4006000 68>, <3990500 66>, <3971300 64>,
-			<3949500 62>, <3927700 60>, <3905200 58>, <3884600 56>,
-			<3868200 54>, <3854000 52>, <3841600 50>, <3830500 48>,
-			<3820400 46>, <3811100 44>, <3802400 42>, <3795100 40>,
-			<3788600 38>, <3783000 36>, <3778200 34>, <3774000 32>,
-			<3769900 30>, <3765800 28>, <3761300 26>, <3755300 24>,
-			<3748200 22>, <3739400 20>, <3728100 18>, <3715600 16>,
-			<3701200 14>, <3686100 12>, <3680100 10>, <3678200 9>,
-			<3676900 8>, <3673600 7>, <3667900 6>, <3650200 5>,
-			<3610600 4>, <3555200 3>, <3481300 2>, <3374500 1>,
-			<3193600 0>;
-	};
 };
 
 &gpu {
@@ -172,7 +154,6 @@
 		#sound-dai-cells = <0>;
 	};
 
-	/* Fairphone 3+ only: Speaker amp TAS2557 @ 4c */
 };
 
 &lpass {
@@ -233,30 +214,6 @@
 	status = "okay";
 };
 
-&pmi632_flash {
-	status = "okay";
-
-	led-0 {
-		function = LED_FUNCTION_FLASH;
-		color = <LED_COLOR_ID_WHITE>;
-		led-sources = <1>;
-		led-max-microamp = <300000>;
-		flash-max-microamp = <1500000>;
-		flash-max-timeout-us = <1280000>;
-		function-enumerator = <0>;
-	};
-
-	led-1 {
-		function = LED_FUNCTION_FLASH;
-		color = <LED_COLOR_ID_WHITE>;
-		led-sources = <2>;
-		led-max-microamp = <300000>;
-		flash-max-microamp = <1500000>;
-		flash-max-timeout-us = <1280000>;
-		function-enumerator = <1>;
-	};
-};
-
 &pmi632_lpg {
 	status = "okay";
 
@@ -312,29 +269,6 @@
 };
 
 &pmi632_vib {
-	status = "okay";
-};
-
-&pmi632_adc {
-	channel@4a {
-		reg = <ADC5_BAT_THERM_100K_PU>;
-		qcom,hw-settle-time = <200>;
-		qcom,pre-scaling = <1 1>;
-		qcom,ratiometric;
-		label = "batt_therm";
-	};
-};
-
-&pmi632_qg {
-	monitored-battery = <&battery>;
-	power-supplies = <&pmi632_charger>;
-	io-channels = <&pmi632_adc ADC5_BAT_THERM_100K_PU>;
-	io-channel-names = "batt-therm";
-	status = "okay";
-};
-
-&pmi632_charger {
-	monitored-battery = <&battery>;
 	status = "okay";
 };
 
@@ -585,7 +519,7 @@
 	status = "okay";
 
 	ports {
-		/* CSIPHY0 → rear camera (IMX363), 4 lanes */
+		/* CSIPHY0 → rear camera (S5KGM1SP), 4 lanes */
 		port@0 {
 			reg = <0>;
 			csiphy0_ep: endpoint {
@@ -595,7 +529,7 @@
 			};
 		};
 
-		/* CSIPHY2 → front camera (S5K4H7YX), 4 lanes */
+		/* CSIPHY2 → front camera (S5K3P9SP), 4 lanes */
 		port@2 {
 			reg = <2>;
 			csiphy2_ep: endpoint {
@@ -618,13 +552,15 @@
 };
 
 &cci_i2c0 {
-	/* Sony IMX363 — 12MP rear camera */
-	camera-sensor@1a {
-		compatible = "sony,imx363";
-		reg = <0x1a>;
+	/* Samsung S5KGM1SP — 48MP rear camera */
+	camera-sensor@10 {
+		compatible = "samsung,s5kgm1sp";
+		reg = <0x10>;
 
 		clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
 		clock-frequency = <24000000>;
+		assigned-clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
+		assigned-clock-rates = <24000000>;
 
 		reset-gpios = <&tlmm 40 GPIO_ACTIVE_LOW>;
 
@@ -635,13 +571,12 @@
 		rotation = <270>;
 		orientation = <1>;
 
-		flash-leds = <&pmi632_flash>;
 		lens-focus = <&actuator>;
 
 		port {
 			rear_cam_ep: endpoint {
 				data-lanes = <0 1 2 3>;
-				link-frequencies = /bits/ 64 <620000000 350000000 510000000>;
+				link-frequencies = /bits/ 64 <576000000 596000000>;
 				remote-endpoint = <&csiphy0_ep>;
 			};
 		};
@@ -658,13 +593,15 @@
 };
 
 &cci_i2c1 {
-	/* Samsung S5K4H7YX — 8MP front camera */
+	/* Samsung S5K3P9SP — 16MP front camera */
 	camera-sensor@10 {
-		compatible = "samsung,s5k4h7yx";
+		compatible = "samsung,s5k3p9sp";
 		reg = <0x10>;
 
 		clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
 		clock-frequency = <24000000>;
+		assigned-clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
+		assigned-clock-rates = <24000000>;
 
 		reset-gpios = <&tlmm 129 GPIO_ACTIVE_LOW>;
 
@@ -678,7 +615,7 @@
 		port {
 			front_cam_ep: endpoint {
 				data-lanes = <0 1 2 3>;
-				link-frequencies = /bits/ 64 <350000000>;
+				link-frequencies = /bits/ 64 <400000000 384000000>;
 				remote-endpoint = <&csiphy2_ep>;
 			};
 		};
