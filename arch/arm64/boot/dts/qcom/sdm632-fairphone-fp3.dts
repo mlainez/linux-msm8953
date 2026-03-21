@@ -51,6 +51,39 @@
 		regulator-boot-on;
 	};
 
+	/* Camera IOVDD, active-high enable on GPIO 130, shared by both cameras */
+	cam_vio: cam-vio-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_vio";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 130 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <200>;
+	};
+
+	/* Rear camera AF actuator supply, active-high enable on GPIO 128 */
+	cam_vaf: cam-vaf-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_vaf";
+		regulator-min-microvolt = <2850000>;
+		regulator-max-microvolt = <2850000>;
+		gpio = <&tlmm 128 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <200>;
+	};
+
+	/* Front camera DVDD, active-high enable on GPIO 46 */
+	cam_vdig_front: cam-vdig-front-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_vdig_front";
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+		gpio = <&tlmm 46 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <200>;
+	};
+
 	battery: battery {
 		compatible = "simple-battery";
 		voltage-min-design-microvolt = <3400000>;
@@ -543,4 +576,111 @@
 	vddrfa-supply = <&pm8953_l19>;
 	vddpa-supply = <&pm8953_l9>;
 	vdddig-supply = <&pm8953_l5>;
+};
+
+/* Camera subsystem */
+
+&camss {
+	vdda-supply = <&pm8953_s3>;
+	status = "okay";
+
+	ports {
+		/* CSIPHY0 → rear camera (IMX363), 4 lanes */
+		port@0 {
+			reg = <0>;
+			csiphy0_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&rear_cam_ep>;
+			};
+		};
+
+		/* CSIPHY2 → front camera (S5K4H7YX), 4 lanes */
+		port@2 {
+			reg = <2>;
+			csiphy2_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&front_cam_ep>;
+			};
+		};
+	};
+};
+
+&cci {
+	pinctrl-names = "default";
+	pinctrl-0 = <&cci0_default>,
+		    <&cci1_default>,
+		    <&camss_mclk0_default>,
+		    <&camss_mclk1_default>;
+
+	status = "okay";
+};
+
+&cci_i2c0 {
+	/* Sony IMX363 — 12MP rear camera */
+	camera-sensor@1a {
+		compatible = "sony,imx363";
+		reg = <0x1a>;
+
+		clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
+		clock-frequency = <24000000>;
+
+		reset-gpios = <&tlmm 40 GPIO_ACTIVE_LOW>;
+
+		vana-supply = <&pm8953_l22>;
+		vdig-supply = <&pm8953_l2>;
+		vif-supply = <&cam_vio>;
+
+		rotation = <270>;
+		orientation = <1>;
+
+		flash-leds = <&pmi632_flash>;
+		lens-focus = <&actuator>;
+
+		port {
+			rear_cam_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				link-frequencies = /bits/ 64 <620000000 350000000 510000000>;
+				remote-endpoint = <&csiphy0_ep>;
+			};
+		};
+	};
+
+	/* AK7374 voice coil motor — rear camera autofocus */
+	actuator: camera-lens@18 {
+		compatible = "asahi-kasei,ak7374";
+		reg = <0x18>;
+
+		vdd-supply = <&cam_vaf>;
+		vio-supply = <&cam_vio>;
+	};
+};
+
+&cci_i2c1 {
+	/* Samsung S5K4H7YX — 8MP front camera */
+	camera-sensor@10 {
+		compatible = "samsung,s5k4h7yx";
+		reg = <0x10>;
+
+		clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
+		clock-frequency = <24000000>;
+
+		reset-gpios = <&tlmm 129 GPIO_ACTIVE_LOW>;
+
+		vana-supply = <&pm8953_l22>;
+		vdig-supply = <&cam_vdig_front>;
+		vif-supply = <&cam_vio>;
+
+		rotation = <270>;
+		orientation = <0>;
+
+		port {
+			front_cam_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				link-frequencies = /bits/ 64 <350000000>;
+				remote-endpoint = <&csiphy2_ep>;
+			};
+		};
+	};
 };
