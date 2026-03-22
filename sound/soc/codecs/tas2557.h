@@ -35,6 +35,10 @@
 #define TAS2557_CLK_ERR2_REG TAS2557_REG(0, 0, 45)
 #define TAS2557_CLK_ERR3_REG TAS2557_REG(0, 0, 46)
 
+/* Book 0, Page 2 registers (boost/sleep config, from stereo driver) */
+#define TAS2557_VBOOST_CTL_REG TAS2557_REG(0, 2, 1)
+#define TAS2557_SLEEPMODE_CTL_REG TAS2557_REG(0, 2, 7)
+
 /* Book 0, Page 0: I2S config */
 #define TAS2557_ASI_CFG1_REG TAS2557_REG(0, 0, 42)
 #define TAS2557_ASI_CFG2_REG TAS2557_REG(0, 0, 43)
