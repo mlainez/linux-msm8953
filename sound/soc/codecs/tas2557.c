@@ -898,21 +898,12 @@ static void tas2557_fw_ready(const struct firmware *fw, void *context)
 
 	/*
 	 * Chip is now fully initialized with firmware but not playing.
-	 * Downstream does NOT explicitly run shutdown here when !mbPowerUp,
-	 * but downstream has IRQ-based clock error recovery that we lack.
-	 *
-	 * The firmware binary may program clock error detection registers
-	 * (CLK_ERR1) within its configuration blocks.  If clock error
-	 * detection is left enabled without BCLK present, the chip will
-	 * self-shutdown ~15-30s after boot and become unreachable on I2C.
-	 *
-	 * Force a safe idle state: disable clock error detection and
-	 * ensure all power rails are down.  The startup sequence in
+	 * Use the full shutdown sequence to reach a safe idle state.
+	 * This disables clock error detection, mutes, powers down,
+	 * and disables GPIO pins — matching downstream shutdown.
 	 * tas2557_startup() will re-enable everything when playback begins.
 	 */
-	tas2557_reg_write(tas2557, TAS2557_CLK_ERR1_REG, 0x00);
-	tas2557_reg_write(tas2557, TAS2557_POWER_CTRL2_REG, 0x00);
-	tas2557_reg_write(tas2557, TAS2557_POWER_CTRL1_REG, 0x00);
+	tas2557_do_shutdown(tas2557);
 
 	tas2557->fw_loaded = true;
 	dev_info(tas2557->dev, "chip programmed and ready for playback\n");
@@ -922,6 +913,34 @@ out:
 }
 
 /* --- ASoC codec --- */
+
+static int tas2557_power_cycle(struct tas2557_data *tas2557)
+{
+	int ret;
+
+	if (tas2557->reset_gpio)
+		gpiod_set_value_cansleep(tas2557->reset_gpio, 0);
+
+	regulator_bulk_disable(TAS2557_NUM_SUPPLIES, tas2557->supplies);
+	msleep(50);
+
+	ret = regulator_bulk_enable(TAS2557_NUM_SUPPLIES, tas2557->supplies);
+	if (ret < 0) {
+		dev_err(tas2557->dev, "regulator re-enable failed: %d\n", ret);
+		return ret;
+	}
+	msleep(10);
+
+	if (tas2557->reset_gpio) {
+		gpiod_set_value_cansleep(tas2557->reset_gpio, 1);
+		msleep(2);
+	}
+
+	tas2557->cur_book = 0;
+	tas2557->cur_page = 0;
+
+	return 0;
+}
 
 static int tas2557_reinit(struct tas2557_data *tas2557)
 {
@@ -938,30 +957,22 @@ static int tas2557_reinit(struct tas2557_data *tas2557)
 		 "reinitializing chip (recovery from idle death)\n");
 
 	tas2557_hw_reset(tas2557);
-
-	/* Try I2C bus recovery — the controller may be stuck from prior EIO */
 	i2c_recover_bus(tas2557->client->adapter);
 
 	ret = tas2557_reg_read(tas2557, TAS2557_REV_PGID_REG, &rev_id);
 	dev_info(tas2557->dev, "post-reset revision read: ret=%d val=0x%x\n",
 		 ret, rev_id);
 	if (ret < 0) {
-		dev_err(tas2557->dev,
-			"chip unresponsive after hw_reset, trying longer reset\n");
-		if (tas2557->reset_gpio) {
-			gpiod_set_value_cansleep(tas2557->reset_gpio, 0);
-			msleep(20);
-			gpiod_set_value_cansleep(tas2557->reset_gpio, 1);
-			msleep(10);
-		}
-		tas2557->cur_book = 0;
-		tas2557->cur_page = 0;
-
+		dev_info(tas2557->dev,
+			 "chip unresponsive after hw_reset, power cycling\n");
+		ret = tas2557_power_cycle(tas2557);
+		if (ret < 0)
+			return ret;
 		i2c_recover_bus(tas2557->client->adapter);
 
 		ret = tas2557_reg_read(tas2557, TAS2557_REV_PGID_REG, &rev_id);
 		dev_info(tas2557->dev,
-			 "post-long-reset revision read: ret=%d val=0x%x\n",
+			 "post-power-cycle revision read: ret=%d val=0x%x\n",
 			 ret, rev_id);
 		if (ret < 0)
 			return ret;
