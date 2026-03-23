@@ -35,6 +35,19 @@
 #define TAS2557_CLK_ERR2_REG TAS2557_REG(0, 0, 45)
 #define TAS2557_CLK_ERR3_REG TAS2557_REG(0, 0, 46)
 
+/* Book 0, Page 0: diagnostic / status registers */
+#define TAS2557_DEBUG_1_REG		TAS2557_REG(0, 0, 53)  /* 0x35 — DPU_FRC */
+#define TAS2557_POWER_UP_FLAG_REG	TAS2557_REG(0, 0, 100) /* 0x64 — power status */
+#define TAS2557_FLAGS_1_REG		TAS2557_REG(0, 0, 104) /* 0x68 — INT_DET_1 sticky */
+#define TAS2557_FLAGS_2_REG		TAS2557_REG(0, 0, 108) /* 0x6C — INT_DET_2 sticky */
+#define TAS2557_LOW_POWER_REG		TAS2557_REG(0, 0, 121) /* 0x79 — VBAT_POR */
+
+/* Book 0, Page 2 registers (boost/sleep config, from stereo driver) */
+#define TAS2557_SLEEPMODE_CTL_REG TAS2557_REG(0, 2, 7)
+
+/* Book 100 (0x64), Page 0: VBoost control (from stereo driver) */
+#define TAS2557_VBOOST_CTL_REG TAS2557_REG(100, 0, 64)
+
 /* Book 0, Page 0: I2S config */
 #define TAS2557_ASI_CFG1_REG TAS2557_REG(0, 0, 42)
 #define TAS2557_ASI_CFG2_REG TAS2557_REG(0, 0, 43)
@@ -46,7 +59,14 @@
 #define TAS2557_GPI_PIN_REG TAS2557_REG(0, 1, 77)
 #define TAS2557_PIN_CTRL1_REG TAS2557_REG(0, 1, 62)
 #define TAS2557_PIN_CTRL2_REG TAS2557_REG(0, 1, 63)
+#define TAS2557_GPIO4_PIN_REG TAS2557_REG(0, 1, 64)
 #define TAS2557_GPIO_HIZ_CTRL2_REG TAS2557_REG(0, 1, 80)
+#define TAS2557_CLK_HALT_REG TAS2557_REG(0, 1, 106)
+#define TAS2557_INT_GEN1_REG TAS2557_REG(0, 1, 108)
+#define TAS2557_INT_GEN2_REG TAS2557_REG(0, 1, 109)
+#define TAS2557_INT_GEN3_REG TAS2557_REG(0, 1, 110)
+#define TAS2557_INT_GEN4_REG TAS2557_REG(0, 1, 111)
+#define TAS2557_INT_MODE_REG TAS2557_REG(0, 1, 114)
 
 /* Book 0, Page 0: SAR ADC (downstream: B0_P0_R20/R21) */
 #define TAS2557_SAR_ADC1_REG TAS2557_REG(0, 0, 20)
