@@ -58,6 +58,7 @@ struct tas2557_data {
 	int cur_page;
 	bool powered;
 	bool fw_loaded;
+	bool programmed;
 };
 
 /* --- Book/Page register access --- */
@@ -706,11 +707,17 @@ static int tas2557_default_init(struct tas2557_data *tas2557)
 	if (ret < 0)
 		return ret;
 
-	ret = tas2557_reg_write(tas2557, TAS2557_CLK_ERR2_REG, 0x21);
+	/*
+	 * CLK_ERR2/3: downstream writes 0x21 here but that enables clock
+	 * error detection while GPIO1/GPIO2 are disabled (no BCLK/WCLK).
+	 * Write 0x00 to keep detection off; startup() enables it when
+	 * clocks are running.
+	 */
+	ret = tas2557_reg_write(tas2557, TAS2557_CLK_ERR2_REG, 0x00);
 	if (ret < 0)
 		return ret;
 
-	ret = tas2557_reg_write(tas2557, TAS2557_CLK_ERR3_REG, 0x21);
+	ret = tas2557_reg_write(tas2557, TAS2557_CLK_ERR3_REG, 0x00);
 	if (ret < 0)
 		return ret;
 
@@ -728,6 +735,29 @@ static int tas2557_default_init(struct tas2557_data *tas2557)
 	/* load_platdata: configIRQ — GPIO HIZ for interrupt pin */
 	ret = tas2557_reg_update_bits(tas2557, TAS2557_GPIO_HIZ_CTRL2_REG, 0x30,
 				      0x30);
+	if (ret < 0)
+		return ret;
+
+	/* IRQ config matching downstream p_tas2557_irq_config[] */
+	ret = tas2557_reg_write(tas2557, TAS2557_CLK_HALT_REG, 0x71);
+	if (ret < 0)
+		return ret;
+	ret = tas2557_reg_write(tas2557, TAS2557_INT_GEN1_REG, 0x03);
+	if (ret < 0)
+		return ret;
+	ret = tas2557_reg_write(tas2557, TAS2557_INT_GEN2_REG, 0x11);
+	if (ret < 0)
+		return ret;
+	ret = tas2557_reg_write(tas2557, TAS2557_INT_GEN3_REG, 0x11);
+	if (ret < 0)
+		return ret;
+	ret = tas2557_reg_write(tas2557, TAS2557_INT_GEN4_REG, 0x01);
+	if (ret < 0)
+		return ret;
+	ret = tas2557_reg_write(tas2557, TAS2557_GPIO4_PIN_REG, 0x07);
+	if (ret < 0)
+		return ret;
+	ret = tas2557_reg_write(tas2557, TAS2557_INT_MODE_REG, 0x80);
 	if (ret < 0)
 		return ret;
 
@@ -782,6 +812,12 @@ static int tas2557_startup(struct tas2557_data *tas2557)
 	ret = tas2557_reg_write(tas2557, TAS2557_CLK_ERR1_REG, 0x2b);
 	if (ret < 0)
 		return ret;
+	ret = tas2557_reg_write(tas2557, TAS2557_CLK_ERR2_REG, 0x21);
+	if (ret < 0)
+		return ret;
+	ret = tas2557_reg_write(tas2557, TAS2557_CLK_ERR3_REG, 0x21);
+	if (ret < 0)
+		return ret;
 
 	return 0;
 }
@@ -800,6 +836,8 @@ static void tas2557_unmute(struct tas2557_data *tas2557)
 static void tas2557_do_shutdown(struct tas2557_data *tas2557)
 {
 	tas2557_reg_write(tas2557, TAS2557_CLK_ERR1_REG, 0x00);
+	tas2557_reg_write(tas2557, TAS2557_CLK_ERR2_REG, 0x00);
+	tas2557_reg_write(tas2557, TAS2557_CLK_ERR3_REG, 0x00);
 	tas2557_reg_write(tas2557, TAS2557_DSP_MUTE_REG, 0x01);
 	usleep_range(10000, 12000);
 	tas2557_reg_write(tas2557, TAS2557_MUTE_REG, 0x03);
@@ -810,6 +848,97 @@ static void tas2557_do_shutdown(struct tas2557_data *tas2557)
 	tas2557_reg_write(tas2557, TAS2557_GPIO1_PIN_REG, 0x00);
 	tas2557_reg_write(tas2557, TAS2557_GPIO2_PIN_REG, 0x00);
 	tas2557_reg_write(tas2557, TAS2557_GPI_PIN_REG, 0x00);
+}
+
+static int tas2557_power_cycle(struct tas2557_data *tas2557);
+
+static int tas2557_program_chip(struct tas2557_data *tas2557)
+{
+	unsigned int sg_val = 0;
+	unsigned int flags1 = 0, flags2 = 0;
+	unsigned int pre_rev = 0, post_rev = 0;
+	int ret;
+
+	if (!tas2557->fw_data || !tas2557->fw_size)
+		return -ENOENT;
+
+	ret = tas2557_reg_read(tas2557, TAS2557_REV_PGID_REG, &pre_rev);
+	dev_info(tas2557->dev,
+		 "program_chip: pre-reset state: ret=%d rev=0x%x\n",
+		 ret, pre_rev);
+
+	tas2557_hw_reset(tas2557);
+
+	ret = tas2557_reg_read(tas2557, TAS2557_REV_PGID_REG, &post_rev);
+	dev_info(tas2557->dev,
+		 "program_chip: post-reset state: ret=%d rev=0x%x\n",
+		 ret, post_rev);
+
+	if (ret < 0) {
+		dev_info(tas2557->dev,
+			 "chip unresponsive after hw_reset, trying power cycle\n");
+		i2c_recover_bus(tas2557->client->adapter);
+
+		ret = tas2557_power_cycle(tas2557);
+		if (ret < 0)
+			return ret;
+		i2c_recover_bus(tas2557->client->adapter);
+
+		ret = tas2557_reg_read(tas2557, TAS2557_REV_PGID_REG,
+				       &post_rev);
+		dev_info(tas2557->dev,
+			 "program_chip: post-power-cycle: ret=%d rev=0x%x\n",
+			 ret, post_rev);
+		if (ret < 0) {
+			dev_err(tas2557->dev,
+				"chip dead after power cycle\n");
+			return ret;
+		}
+	}
+
+	ret = tas2557_reg_write(tas2557, TAS2557_SW_RESET_REG,
+				TAS2557_SW_RESET);
+	if (ret < 0)
+		return ret;
+
+	msleep(1);
+	tas2557->cur_book = 0;
+	tas2557->cur_page = 0;
+
+	ret = tas2557_default_init(tas2557);
+	if (ret < 0)
+		return ret;
+
+	tas2557_reg_read(tas2557, TAS2557_FLAGS_1_REG, &flags1);
+	tas2557_reg_read(tas2557, TAS2557_FLAGS_2_REG, &flags2);
+
+	ret = tas2557_load_firmware(tas2557, tas2557->fw_data,
+				    tas2557->fw_size);
+	if (ret < 0)
+		return ret;
+
+	ret = tas2557_reg_read(tas2557, TAS2557_SAFE_GUARD_REG, &sg_val);
+	if (ret < 0 || sg_val != TAS2557_SAFE_GUARD_PATTERN)
+		return -EIO;
+
+	return 0;
+}
+
+static int tas2557_program_and_start(struct tas2557_data *tas2557)
+{
+	int ret;
+
+	ret = tas2557_program_chip(tas2557);
+	if (ret < 0)
+		return ret;
+
+	ret = tas2557_startup(tas2557);
+	if (ret < 0)
+		return ret;
+
+	tas2557_unmute(tas2557);
+
+	return 0;
 }
 
 /*
@@ -828,7 +957,6 @@ static void tas2557_do_shutdown(struct tas2557_data *tas2557)
 static void tas2557_fw_ready(const struct firmware *fw, void *context)
 {
 	struct tas2557_data *tas2557 = context;
-	unsigned int sg_val = 0;
 	int ret;
 
 	if (!fw) {
@@ -837,76 +965,45 @@ static void tas2557_fw_ready(const struct firmware *fw, void *context)
 		return;
 	}
 
+	if (fw->size < 4 || fw->data[0] != 0x35 || fw->data[1] != 0x35 ||
+	    fw->data[2] != 0x35 || fw->data[3] != 0x32) {
+		dev_err(tas2557->dev, "invalid firmware magic\n");
+		goto out;
+	}
+
+	tas2557->fw_data = devm_kmemdup(tas2557->dev, fw->data, fw->size,
+					GFP_KERNEL);
+	if (!tas2557->fw_data) {
+		dev_err(tas2557->dev, "failed to save firmware copy\n");
+		goto out;
+	}
+
+	tas2557->fw_size = fw->size;
+	tas2557->fw_loaded = true;
+
+	/*
+	 * Program chip immediately matching downstream tas2557_set_program().
+	 * The chip must be configured before the modem boots, otherwise the
+	 * modem boot kills the chip via a shared resource conflict.
+	 *
+	 * After programming, park in software shutdown (no startup/unmute).
+	 * The enable path will call startup+unmute on first playback.
+	 */
 	dev_info(tas2557->dev,
-		 "firmware %s loaded (%zu bytes), programming chip\n",
+		 "firmware %s loaded (%zu bytes), programming chip now\n",
 		 TAS2557_FW_NAME, fw->size);
 
-	/*
-	 * Full chip init matching downstream tas2557_set_program():
-	 * hw_reset → SW_RESET → default_init → load firmware blocks
-	 */
-	tas2557_hw_reset(tas2557);
-
-	ret = tas2557_reg_write(tas2557, TAS2557_SW_RESET_REG,
-				TAS2557_SW_RESET);
+	ret = tas2557_program_chip(tas2557);
 	if (ret < 0) {
-		dev_err(tas2557->dev, "SW_RESET failed in fw_ready: %d\n", ret);
-		goto out;
+		dev_err(tas2557->dev,
+			"failed to program chip in fw_ready: %d\n", ret);
+		tas2557->programmed = false;
+	} else {
+		tas2557->programmed = true;
+		tas2557_do_shutdown(tas2557);
+		dev_info(tas2557->dev,
+			 "chip programmed and parked in shutdown\n");
 	}
-	msleep(1);
-	tas2557->cur_book = 0;
-	tas2557->cur_page = 0;
-
-	ret = tas2557_default_init(tas2557);
-	if (ret < 0) {
-		dev_err(tas2557->dev, "default_init failed in fw_ready: %d\n",
-			ret);
-		goto out;
-	}
-
-	/* Load firmware blocks (program 0 + PLL 0 + config 0) */
-	ret = tas2557_load_firmware(tas2557, fw->data, fw->size);
-
-	if (ret < 0) {
-		dev_err(tas2557->dev, "firmware programming failed: %d\n", ret);
-		goto out;
-	}
-
-	/* Verify safe guard pattern survived firmware loading */
-	ret = tas2557_reg_read(tas2557, TAS2557_SAFE_GUARD_REG, &sg_val);
-	if (ret < 0 || sg_val != TAS2557_SAFE_GUARD_PATTERN) {
-		dev_warn(
-			tas2557->dev,
-			"safe guard check after fw load: ret=%d val=0x%x (expected 0x%x)\n",
-			ret, sg_val, TAS2557_SAFE_GUARD_PATTERN);
-	}
-
-	/*
-	 * Keep a copy of the firmware data so we can re-program the chip
-	 * later if it dies during idle (safe guard check failure).
-	 */
-	if (!tas2557->fw_data) {
-		tas2557->fw_data = devm_kmemdup(tas2557->dev, fw->data,
-						fw->size, GFP_KERNEL);
-		if (tas2557->fw_data)
-			tas2557->fw_size = fw->size;
-		else
-			dev_warn(
-				tas2557->dev,
-				"failed to save firmware copy — recovery will not work\n");
-	}
-
-	/*
-	 * Chip is now fully initialized with firmware but not playing.
-	 * Use the full shutdown sequence to reach a safe idle state.
-	 * This disables clock error detection, mutes, powers down,
-	 * and disables GPIO pins — matching downstream shutdown.
-	 * tas2557_startup() will re-enable everything when playback begins.
-	 */
-	tas2557_do_shutdown(tas2557);
-
-	tas2557->fw_loaded = true;
-	dev_info(tas2557->dev, "chip programmed and ready for playback\n");
 
 out:
 	release_firmware(fw);
@@ -978,22 +1075,12 @@ static int tas2557_reinit(struct tas2557_data *tas2557)
 			return ret;
 	}
 
-	ret = tas2557_reg_write(tas2557, TAS2557_SW_RESET_REG,
-				TAS2557_SW_RESET);
-	if (ret < 0)
-		return ret;
-	msleep(1);
-	tas2557->cur_book = 0;
-	tas2557->cur_page = 0;
-
-	ret = tas2557_default_init(tas2557);
+	ret = tas2557_program_and_start(tas2557);
 	if (ret < 0)
 		return ret;
 
-	ret = tas2557_load_firmware(tas2557, tas2557->fw_data,
-				    tas2557->fw_size);
-	if (ret < 0)
-		return ret;
+	tas2557->programmed = true;
+	tas2557->powered = true;
 
 	return 0;
 }
@@ -1022,52 +1109,28 @@ static int tas2557_enable(struct tas2557_data *tas2557, bool enable)
 			return -ENODEV;
 		}
 
-		/* Verify safe guard — chip is still alive and programmed */
-		ret = tas2557_reg_read(tas2557, TAS2557_SAFE_GUARD_REG,
-				       &sg_val);
-		if (ret < 0 || sg_val != TAS2557_SAFE_GUARD_PATTERN) {
-			dev_warn(
-				tas2557->dev,
-				"safe guard failed (ret=%d val=0x%x), attempting reinit\n",
-				ret, sg_val);
-			ret = tas2557_reinit(tas2557);
-			if (ret < 0) {
-				dev_err(tas2557->dev, "reinit failed: %d\n",
-					ret);
+		if (!tas2557->programmed) {
+			ret = tas2557_program_and_start(tas2557);
+			if (ret < 0)
 				return ret;
+			tas2557->programmed = true;
+		} else {
+			ret = tas2557_reg_read(tas2557, TAS2557_SAFE_GUARD_REG,
+					       &sg_val);
+			if (ret < 0 || sg_val != TAS2557_SAFE_GUARD_PATTERN) {
+				ret = tas2557_program_and_start(tas2557);
+				if (ret < 0)
+					return ret;
+				tas2557->programmed = true;
+			} else {
+				ret = tas2557_startup(tas2557);
+				if (ret < 0)
+					return ret;
+				tas2557_unmute(tas2557);
 			}
 		}
 
-		ret = tas2557_startup(tas2557);
-		if (ret < 0) {
-			dev_err(tas2557->dev, "startup failed: %d\n", ret);
-			return ret;
-		}
-
-		tas2557_unmute(tas2557);
 		tas2557->powered = true;
-
-		{
-			unsigned int spk_ctrl = 0, mute_val = 0, pwr1 = 0;
-			unsigned int pwr2 = 0, clk_err1 = 0;
-
-			tas2557_reg_read(tas2557, TAS2557_SPK_CTRL_REG,
-					 &spk_ctrl);
-			tas2557_reg_read(tas2557, TAS2557_MUTE_REG, &mute_val);
-			tas2557_reg_read(tas2557, TAS2557_POWER_CTRL1_REG,
-					 &pwr1);
-			tas2557_reg_read(tas2557, TAS2557_POWER_CTRL2_REG,
-					 &pwr2);
-			tas2557_reg_read(tas2557, TAS2557_CLK_ERR1_REG,
-					 &clk_err1);
-
-			dev_info(
-				tas2557->dev,
-				"post-unmute regs: SPK_CTRL=0x%02x MUTE=0x%02x PWR1=0x%02x PWR2=0x%02x CLK_ERR1=0x%02x\n",
-				spk_ctrl, mute_val, pwr1, pwr2, clk_err1);
-		}
-
-		dev_info(tas2557->dev, "amplifier enabled\n");
 	} else {
 		if (tas2557->powered) {
 			tas2557_do_shutdown(tas2557);
@@ -1247,34 +1310,24 @@ static int tas2557_i2c_probe(struct i2c_client *client)
 				     "failed to allocate register map\n");
 
 	/*
-	 * SW_RESET + revision read, matching downstream i2c_probe:
-	 *   tas2557_dev_write(SW_RESET, 0x01)
-	 *   msleep(1)
-	 *   tas2557_dev_read(REV_PGID, &revision)
+	 * Revision read after hw_reset. Do NOT SW_RESET here — it
+	 * restores hardware defaults including CLK_ERR detection that
+	 * kills the chip without BCLK. program_and_start() handles
+	 * SW_RESET + CLK_ERR disable as an atomic sequence.
 	 */
-	ret = tas2557_reg_write(tas2557, TAS2557_SW_RESET_REG,
-				TAS2557_SW_RESET);
-	if (ret < 0)
-		return dev_err_probe(dev, ret, "SW_RESET failed\n");
-	msleep(1);
-
 	ret = tas2557_reg_read(tas2557, TAS2557_REV_PGID_REG, &rev_id);
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "failed to read REV_PGID\n");
 
 	dev_info(dev, "TAS2557 revision: 0x%02x\n", rev_id);
 
+	/* Disable clock error detection to keep chip alive during idle */
+	tas2557_reg_write(tas2557, TAS2557_CLK_ERR1_REG, 0x00);
+	tas2557_reg_write(tas2557, TAS2557_CLK_ERR2_REG, 0x00);
+	tas2557_reg_write(tas2557, TAS2557_CLK_ERR3_REG, 0x00);
+
 	dev_set_drvdata(dev, tas2557);
 
-	/*
-	 * Request firmware asynchronously, matching downstream:
-	 *   request_firmware_nowait(THIS_MODULE, ..., TAS2557_FW_NAME,
-	 *                           dev, GFP_KERNEL, pTAS2557,
-	 *                           tas2557_fw_ready)
-	 *
-	 * The callback will init the chip with firmware immediately,
-	 * before the chip can die from idle timeout.
-	 */
 	ret = request_firmware_nowait(THIS_MODULE, true, TAS2557_FW_NAME, dev,
 				      GFP_KERNEL, tas2557, tas2557_fw_ready);
 	if (ret < 0)
@@ -1297,12 +1350,21 @@ MODULE_DEVICE_TABLE(of, tas2557_of_match);
 static const struct i2c_device_id tas2557_id[] = { { "tas2557", 0 }, {} };
 MODULE_DEVICE_TABLE(i2c, tas2557_id);
 
+static void tas2557_i2c_remove(struct i2c_client *client)
+{
+	struct tas2557_data *tas2557 = dev_get_drvdata(&client->dev);
+
+	if (tas2557->powered)
+		tas2557_do_shutdown(tas2557);
+}
+
 static struct i2c_driver tas2557_i2c_driver = {
 	.driver = {
 		.name = "tas2557",
 		.of_match_table = of_match_ptr(tas2557_of_match),
 	},
 	.probe = tas2557_i2c_probe,
+	.remove = tas2557_i2c_remove,
 	.id_table = tas2557_id,
 };
 
