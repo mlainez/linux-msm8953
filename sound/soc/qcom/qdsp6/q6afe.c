@@ -1691,11 +1691,40 @@ static int q6afe_send_cdc_slimbus_slave_cfg(struct q6afe *afe)
 			u16 reg_offset_scale;
 		} __packed;
 
+		/*
+		 * Full downstream tasha audio_reg_cfg table (22 entries).
+		 * Register addresses = TASHA_REGISTER_START_OFFSET (0x800) + reg.
+		 * Field types from wcd9xxx-common-v2.h enum (starts at 0).
+		 */
 		static const struct afe_param_cdc_reg_cfg_t cdc_regs[] = {
-			{ 1, 0x850, 196, 0x1E, 8, 1 }, /* TX watermark */
-			{ 1, 0x850, 197, 0x01, 8, 1 }, /* TX enable */
-			{ 1, 0x840, 198, 0x1E, 8, 1 }, /* RX watermark */
-			{ 1, 0x840, 199, 0x01, 8, 1 }, /* RX enable */
+			/* MAD (Microphone Activity Detection) */
+			{ 1, 0x800+0x0281, 4, 0x01, 8, 0 },  /* HW_MAD_AUDIO_ENABLE */
+			{ 1, 0x800+0x0285, 7, 0x0F, 8, 0 },  /* HW_MAD_AUDIO_SLEEP_TIME */
+			{ 1, 0x800+0x0286, 10, 0x01, 8, 0 }, /* HW_MAD_TX_AUDIO_SWITCH_OFF */
+			/* Interrupt routing */
+			{ 1, 0x800+0x0081, 13, 0x02, 8, 0 }, /* MAD_AUDIO_INT_DEST_SELECT */
+			{ 1, 0x800+0x00a4, 18, 0x01, 8, 0 }, /* MAD_AUDIO_INT_MASK */
+			{ 1, 0x800+0x00ac, 23, 0x01, 8, 0 }, /* MAD_AUDIO_INT_STATUS */
+			{ 1, 0x800+0x00b4, 28, 0x01, 8, 0 }, /* MAD_AUDIO_INT_CLEAR */
+			/* VBAT */
+			{ 1, 0x800+0x0081, 17, 0x02, 8, 0 }, /* VBAT_INT_DEST_SELECT */
+			{ 1, 0x800+0x00a4, 22, 0x08, 8, 0 }, /* VBAT_INT_MASK */
+			{ 1, 0x800+0x00ac, 27, 0x08, 8, 0 }, /* VBAT_INT_STATUS */
+			{ 1, 0x800+0x00b4, 32, 0x08, 8, 0 }, /* VBAT_INT_CLEAR */
+			/* VBAT release */
+			{ 1, 0x800+0x0081, 216, 0x02, 8, 0 }, /* VBAT_RELEASE_INT_DEST */
+			{ 1, 0x800+0x00a4, 217, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_MASK */
+			{ 1, 0x800+0x00ac, 218, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_STATUS */
+			{ 1, 0x800+0x00b4, 219, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_CLEAR */
+			/* SLIMbus PGD ports */
+			{ 1, 0x850, 196, 0x1E, 8, 1 }, /* SB_PGD_PORT_TX_WATERMARK */
+			{ 1, 0x850, 197, 0x01, 8, 1 }, /* SB_PGD_PORT_TX_ENABLE */
+			{ 1, 0x840, 198, 0x1E, 8, 1 }, /* SB_PGD_PORT_RX_WATERMARK */
+			{ 1, 0x840, 199, 0x01, 8, 1 }, /* SB_PGD_PORT_RX_ENABLE */
+			/* AANC */
+			{ 1, 0x800+0x0a0b, 204, 0x04, 8, 0 }, /* AANC_FF_GAIN_ADAPTIVE */
+			{ 1, 0x800+0x0a0b, 205, 0x08, 8, 0 }, /* AANC_FFGAIN_ADAPTIVE_EN */
+			{ 1, 0x800+0x0a0e, 206, 0xFF, 8, 0 }, /* AANC_GAIN_CONTROL */
 		};
 		int ok = 0;
 
@@ -1708,6 +1737,11 @@ static int q6afe_send_cdc_slimbus_slave_cfg(struct q6afe *afe)
 					      AFE_CLK_TOKEN);
 			if (!ret)
 				ok++;
+			else
+				dev_info(afe->dev,
+					 "CDC_REG_CFG[%d] type=%d addr=0x%x: REJECTED\n",
+					 i, cdc_regs[i].reg_field_type,
+					 cdc_regs[i].reg_logical_addr);
 		}
 		dev_info(afe->dev, "CDC_REG_CFG: %d/%zu accepted\n",
 			 ok, ARRAY_SIZE(cdc_regs));
