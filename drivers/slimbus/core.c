@@ -30,7 +30,8 @@ static const struct slim_device_id *slim_match(const struct slim_device_id *id,
 	return NULL;
 }
 
-static int slim_device_match(struct device *dev, const struct device_driver *drv)
+static int slim_device_match(struct device *dev,
+			     const struct device_driver *drv)
 {
 	struct slim_device *sbdev = to_slim_device(dev);
 	const struct slim_driver *sbdrv = to_slim_driver(drv);
@@ -61,8 +62,8 @@ static void slim_device_update_status(struct slim_device *sbdev,
 
 static int slim_device_probe(struct device *dev)
 {
-	struct slim_device	*sbdev = to_slim_device(dev);
-	struct slim_driver	*sbdrv = to_slim_driver(dev->driver);
+	struct slim_device *sbdev = to_slim_device(dev);
+	struct slim_driver *sbdrv = to_slim_driver(dev->driver);
 	int ret;
 
 	ret = sbdrv->probe(sbdev);
@@ -74,11 +75,12 @@ static int slim_device_probe(struct device *dev)
 	if (!ret) {
 		slim_device_update_status(sbdev, SLIM_DEVICE_STATUS_UP);
 	} else {
-		dev_err(&sbdev->dev, "Failed to get logical address\n");
-		ret = -EPROBE_DEFER;
+		dev_info(
+			&sbdev->dev,
+			"logical address not yet available, deferring status update\n");
 	}
 
-	return ret;
+	return 0;
 }
 
 static void slim_device_remove(struct device *dev)
@@ -93,7 +95,8 @@ static void slim_device_remove(struct device *dev)
 	}
 }
 
-static int slim_device_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int slim_device_uevent(const struct device *dev,
+			      struct kobj_uevent_env *env)
 {
 	const struct slim_device *sbdev = to_slim_device(dev);
 
@@ -101,11 +104,11 @@ static int slim_device_uevent(const struct device *dev, struct kobj_uevent_env *
 }
 
 const struct bus_type slimbus_bus = {
-	.name		= "slimbus",
-	.match		= slim_device_match,
-	.probe		= slim_device_probe,
-	.remove		= slim_device_remove,
-	.uevent		= slim_device_uevent,
+	.name = "slimbus",
+	.match = slim_device_match,
+	.probe = slim_device_probe,
+	.remove = slim_device_remove,
+	.uevent = slim_device_uevent,
 };
 EXPORT_SYMBOL_GPL(slimbus_bus);
 
@@ -151,8 +154,7 @@ static void slim_dev_release(struct device *dev)
 }
 
 static int slim_add_device(struct slim_controller *ctrl,
-			   struct slim_device *sbdev,
-			   struct device_node *node)
+			   struct slim_device *sbdev, struct device_node *node)
 {
 	sbdev->dev.bus = &slimbus_bus;
 	sbdev->dev.parent = ctrl->dev;
@@ -164,11 +166,9 @@ static int slim_add_device(struct slim_controller *ctrl,
 	sbdev->dev.of_node = of_node_get(node);
 	sbdev->dev.fwnode = of_fwnode_handle(node);
 
-	dev_set_name(&sbdev->dev, "%x:%x:%x:%x",
-				  sbdev->e_addr.manf_id,
-				  sbdev->e_addr.prod_code,
-				  sbdev->e_addr.dev_index,
-				  sbdev->e_addr.instance);
+	dev_set_name(&sbdev->dev, "%x:%x:%x:%x", sbdev->e_addr.manf_id,
+		     sbdev->e_addr.prod_code, sbdev->e_addr.dev_index,
+		     sbdev->e_addr.instance);
 
 	return device_register(&sbdev->dev);
 }
@@ -269,8 +269,8 @@ int slim_register_controller(struct slim_controller *ctrl)
 	init_completion(&ctrl->sched.pause_comp);
 	spin_lock_init(&ctrl->txn_lock);
 
-	dev_dbg(ctrl->dev, "Bus [%s] registered:dev:%p\n",
-		ctrl->name, ctrl->dev);
+	dev_dbg(ctrl->dev, "Bus [%s] registered:dev:%p\n", ctrl->name,
+		ctrl->dev);
 
 	of_register_slim_devices(ctrl);
 
@@ -331,10 +331,8 @@ EXPORT_SYMBOL_GPL(slim_report_absent);
 static bool slim_eaddr_equal(const struct slim_eaddr *a,
 			     const struct slim_eaddr *b)
 {
-	return (a->manf_id == b->manf_id &&
-		a->prod_code == b->prod_code &&
-		a->dev_index == b->dev_index &&
-		a->instance == b->instance);
+	return (a->manf_id == b->manf_id && a->prod_code == b->prod_code &&
+		a->dev_index == b->dev_index && a->instance == b->instance);
 }
 
 static int slim_match_dev(struct device *dev, const void *data)
@@ -430,8 +428,8 @@ static int slim_device_alloc_laddr(struct slim_device *sbdev,
 		if (ret < 0)
 			goto err;
 	} else if (report_present) {
-		ret = ida_alloc_max(&ctrl->laddr_ida,
-				    SLIM_LA_MANAGER - 1, GFP_KERNEL);
+		ret = ida_alloc_max(&ctrl->laddr_ida, SLIM_LA_MANAGER - 1,
+				    GFP_KERNEL);
 		if (ret < 0)
 			goto err;
 
@@ -455,8 +453,8 @@ static int slim_device_alloc_laddr(struct slim_device *sbdev,
 
 	slim_device_update_status(sbdev, SLIM_DEVICE_STATUS_UP);
 
-	dev_dbg(ctrl->dev, "setting slimbus l-addr:%x, ea:%x,%x,%x,%x\n",
-		laddr, sbdev->e_addr.manf_id, sbdev->e_addr.prod_code,
+	dev_dbg(ctrl->dev, "setting slimbus l-addr:%x, ea:%x,%x,%x,%x\n", laddr,
+		sbdev->e_addr.manf_id, sbdev->e_addr.prod_code,
 		sbdev->e_addr.dev_index, sbdev->e_addr.instance);
 
 	return 0;
@@ -464,7 +462,6 @@ static int slim_device_alloc_laddr(struct slim_device *sbdev,
 err:
 	mutex_unlock(&ctrl->lock);
 	return ret;
-
 }
 
 /**
@@ -489,7 +486,7 @@ int slim_device_report_present(struct slim_controller *ctrl,
 
 	if (ctrl->sched.clk_state != SLIM_CLK_ACTIVE) {
 		dev_err(ctrl->dev, "slim ctrl not active,state:%d, ret:%d\n",
-				    ctrl->sched.clk_state, ret);
+			ctrl->sched.clk_state, ret);
 		goto out_put_rpm;
 	}
 
