@@ -36,7 +36,6 @@
 #include <linux/notifier.h>
 #include <linux/remoteproc/qcom_rproc.h>
 #include <linux/soc/qcom/pdr.h>
-#include <linux/gpio/consumer.h>
 #include <net/sock.h>
 #include "slimbus.h"
 
@@ -153,10 +152,6 @@
 #define LADDR_RETRY		30
 
 #define SLIM_MSGQ_BUF_LEN	40
-
-/* Forward declarations */
-static int msm8953_slim_get_laddr(struct slim_controller *ctrl,
-				  struct slim_eaddr *ea, u8 *laddr);
 
 /* REPORT_SATELLITE magic bytes */
 #define SAT_MAGIC_LSB	0xD9
@@ -397,10 +392,6 @@ struct msm8953_slim_ctrl {
 	void *data_buf[2];
 	dma_addr_t data_buf_phys[2];
 	bool data_pipe_armed[2];
-
-	/* PGD data port mapping (from apps_pipes) */
-	int port_b[2];	/* PGD hardware port numbers (pipe_idx - 7) */
-	int num_data_ports;
 };
 
 /* ---- Helpers ------------------------------------------------------------- */
@@ -1691,92 +1682,6 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 		}
 	}
 
-	/*
-	 * After a codec CONNECT_SINK, send a matching PGD CONNECT_SOURCE
-	 * to tell the ADSP which PGD data port is the source for this
-	 * channel. Then enable the PGD port and arm the BAM data pipe.
-	 * This matches downstream's ngd_xfer_msg PGD handling.
-	 */
-	if (0 && !ret && txn_mc == SLIM_USR_MC_CONNECT_SINK &&
-	    orig_la != 0 && dev->num_data_ports > 0) {
-		DECLARE_COMPLETION_ONSTACK(pgd_done);
-		DECLARE_COMPLETION_ONSTACK(pgd_tx_sent);
-		u32 pgd_buf[4] = {};
-		u8 *pgd_puc;
-		struct slim_msg_txn pgd_txn = {};
-		int port_idx = 0; /* use first data port for RX playback */
-		u8 pgd_port = dev->port_b[port_idx];
-
-		/* PGD LA must be resolved already (in slave_notify_worker) */
-		if (dev->pgdla == SLIM_LA_MGR) {
-			dev_warn(dev->dev, "PGD LA not resolved, skipping PGD CONNECT\n");
-			goto xfer_err;
-		}
-
-		/* Skip BAM/PGD hardware setup for now — test CONNECT only */
-		/* msm8953_slim_enable_pgd_port(dev, pgd_port, port_idx); */
-		/* msm8953_slim_arm_data_pipe(dev, port_idx, pgd_port); */
-
-		/* Build PGD CONNECT_SOURCE message */
-		pgd_txn.mt = SLIM_MSG_MT_DEST_REFERRED_USER;
-		pgd_txn.mc = SLIM_USR_MC_CONNECT_SRC;
-		pgd_txn.dt = SLIM_MSG_DEST_LOGICALADDR;
-		pgd_txn.la = SLIM_LA_MGR;
-		pgd_txn.comp = &pgd_done;
-
-		ret = slim_alloc_txn_tid(ctrl, &pgd_txn);
-		if (ret) {
-			dev_warn(dev->dev, "PGD CONNECT TID alloc failed\n");
-			goto xfer_err;
-		}
-
-		/* wbuf: [pgdla, port_b, channel, tid] — RL=7 (4 payload + 3 header - 1) */
-		pgd_buf[0] = SLIM_MSG_ASM_FIRST_WORD(7,
-				SLIM_MSG_MT_DEST_REFERRED_USER,
-				SLIM_USR_MC_CONNECT_SRC,
-				SLIM_MSG_DEST_LOGICALADDR,
-				SLIM_LA_MGR);
-		pgd_puc = ((u8 *)pgd_buf) + 3;
-		*pgd_puc++ = dev->pgdla;
-		*pgd_puc++ = pgd_port;
-		*pgd_puc++ = orig_wbuf1; /* channel number from codec CONNECT */
-		*pgd_puc++ = pgd_txn.tid;
-
-		dev_info(dev->dev,
-			 "PGD CONNECT_SRC: pgdla=%d port_b=%d chan=%d tid=%d\n",
-			 dev->pgdla, pgd_port, orig_wbuf1, pgd_txn.tid);
-
-		dev->wr_comp = &pgd_tx_sent;
-		dev->err = 0;
-		if (dev->use_bam_tx)
-			ret = msm8953_slim_bam_tx(dev, pgd_buf, 7);
-		else
-			ret = msm8953_slim_ahb_tx(dev, pgd_buf, 7,
-				NGD_BASE(dev->ctrl_nr) + NGD_TX_MSG);
-		if (!ret) {
-			int t = wait_for_completion_timeout(&pgd_tx_sent, HZ);
-			if (!t) {
-				dev_warn(dev->dev, "PGD CONNECT TX timeout\n");
-				ret = -ETIMEDOUT;
-			}
-		}
-		dev->wr_comp = NULL;
-
-		dev->wr_comp = NULL;
-
-		if (!ret) {
-			int t = wait_for_completion_timeout(&pgd_done,
-							    msecs_to_jiffies(200));
-			if (!t)
-				dev_warn(dev->dev, "PGD CONNECT ACK timeout\n");
-			else
-				dev_info(dev->dev, "PGD CONNECT ACK OK\n");
-		}
-		slim_free_txn_tid(ctrl, &pgd_txn);
-		/* Reset ret so codec CONNECT success is returned */
-		ret = 0;
-	}
-
 xfer_err:
 	mutex_unlock(&dev->tx_lock);
 	pm_runtime_mark_last_busy(dev->dev);
@@ -1940,34 +1845,23 @@ static void msm8953_slim_slave_notify_worker(struct work_struct *work)
 	struct device_node *parent = dev->ngd_node ?: dev->dev->of_node;
 
 	/*
-	 * The ADSP SLIMbus manager is now active (REPORT_SATELLITE was ACKed).
-	 * Wait for the codec driver to probe (it enables MCLK but does NOT
-	 * pulse reset — see wcd9335.c).  Then pulse the codec reset GPIO
-	 * ourselves so that REPORT_PRESENT is sent while the bus is active.
+	 * Wait for the WCD9335 codec driver to probe. It needs to:
+	 * 1. Enable MCLK via gpio-gate-clock (asserts PMIC GPIO)
+	 * 2. Release reset GPIO
+	 * 3. Wait for codec to boot SLIMbus interface
+	 * 4. Codec sends REPORT_PRESENT to ADSP manager
+	 * 5. ADSP assigns LA
+	 *
+	 * Only then can ADDR_QUERY succeed. The codec driver probe runs
+	 * asynchronously, so we wait 1s to ensure it completes.
 	 */
-	msleep(2000);
-
-	/* Pulse reset on all codec children that have a reset-gpios property */
-	for_each_child_of_node(parent, node) {
-		struct gpio_desc *rst;
-
-		rst = fwnode_gpiod_get_index(of_fwnode_handle(node),
-					     "reset", 0, GPIOD_OUT_LOW,
-					     "codec-reset");
-		if (IS_ERR(rst))
-			continue;
-
-		dev_info(dev->dev, "Pulsing reset for %pOFn\n", node);
-		usleep_range(600, 650);
-		gpiod_set_value(rst, 1);   /* assert reset */
-		msleep(20);
-		gpiod_set_value(rst, 0);   /* deassert reset */
-		msleep(20);
-		gpiod_put(rst);
-	}
-
-	/* Give codec 500ms to boot and send REPORT_PRESENT */
-	msleep(500);
+	/*
+	 * Wait for codec to boot. The WCD9335 needs MCLK + reset release
+	 * (done by its driver probe) before it can enumerate on SLIMbus.
+	 * The probe runs asynchronously — wait 3s for it to complete,
+	 * then ADDR_QUERY retries handle any remaining delay.
+	 */
+	msleep(3000);
 	for_each_child_of_node(parent, node) {
 		sbdev = of_slim_get_device(ctrl, node);
 		if (!sbdev)
@@ -2004,28 +1898,6 @@ static void msm8953_slim_slave_notify_worker(struct work_struct *work)
 		put_device(&sbdev->dev);
 	}
 
-	/* Resolve PGD logical address for data pipe setup.
-	 * The PGD device has EA: manf=0x0217, prod=eapc, dev_index=5.
-	 * This must be done here (not in xfer_msg) to avoid tx_lock deadlock.
-	 */
-	if (dev->pgdla == SLIM_LA_MGR && dev->num_data_ports > 0) {
-		struct slim_eaddr pgd_ea = {
-			.manf_id = 0x0217,
-			.prod_code = dev->eapc,
-			.dev_index = 5,
-			.instance = 0,
-		};
-		u8 pgd_la = 0;
-
-		/* Direct ADDR_QUERY — no tx_lock held in worker context */
-		ret = msm8953_slim_get_laddr(ctrl, &pgd_ea, &pgd_la);
-		if (!ret) {
-			dev->pgdla = pgd_la;
-			dev_info(dev->dev, "PGD LA resolved: %d\n", pgd_la);
-		} else {
-			dev_warn(dev->dev, "PGD ADDR_QUERY failed: %d\n", ret);
-		}
-	}
 }
 
 /* ---- SSR / power-up worker ----------------------------------------------- */
@@ -2281,25 +2153,6 @@ static int msm8953_slim_probe(struct platform_device *pdev)
 	memset(dev->pipe_map, 0xFF, sizeof(dev->pipe_map));
 	dev->pipe_alloc = 0;
 	atomic_set(&dev->ssr_in_progress, 0);
-
-	/* Compute PGD data port mapping from apps_pipes bitmask.
-	 * Downstream: msm_slim_data_port_assign() — first 7 BAM pipes are
-	 * for message queues, so PGD port = BAM_pipe - 7.
-	 * apps_pipes=0x600000 → bits 21,22 → port_b = 14, 15
-	 */
-	{
-		int i, n = 0;
-
-		for (i = 7; i < 32 && n < 2; i++) {
-			if ((dev->apps_pipes >> i) & 1) {
-				dev->port_b[n] = i - 7;
-				dev_info(&pdev->dev, "Data port %d: BAM pipe %d → port_b %d\n",
-					 n, i, dev->port_b[n]);
-				n++;
-			}
-		}
-		dev->num_data_ports = n;
-	}
 
 	dev->state  = MSM8953_SLIM_DOWN;
 	dev->pgdla  = SLIM_LA_MGR;
