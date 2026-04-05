@@ -149,7 +149,7 @@
 
 #define SLIM_LA_MGR		0xFF
 #define SLIM_ROOT_FREQ		24576000
-#define LADDR_RETRY		30
+#define LADDR_RETRY		60
 
 #define SLIM_MSGQ_BUF_LEN	40
 
@@ -1858,10 +1858,11 @@ static void msm8953_slim_slave_notify_worker(struct work_struct *work)
 	/*
 	 * Wait for codec to boot. The WCD9335 needs MCLK + reset release
 	 * (done by its driver probe) before it can enumerate on SLIMbus.
-	 * The probe runs asynchronously — wait 3s for it to complete,
+	 * The probe runs asynchronously — wait 5s for it to complete,
 	 * then ADDR_QUERY retries handle any remaining delay.
+	 * 5s + 60 retries × 500ms = 35s total window.
 	 */
-	msleep(3000);
+	msleep(5000);
 	for_each_child_of_node(parent, node) {
 		sbdev = of_slim_get_device(ctrl, node);
 		if (!sbdev)

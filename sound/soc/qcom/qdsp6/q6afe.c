@@ -1770,33 +1770,35 @@ static int q6afe_send_acdb_afe_cal(struct q6afe *afe, struct q6afe_port *port,
 		dev_info(afe->dev,
 			 "ACDB: sending AFE cal dev=%u rate=%u (%u bytes, %u params)\n",
 			 did, rate, blob_sz, npairs);
+
+		/*
+		 * Send each calibration param individually via
+		 * q6afe_port_set_param_v2 to avoid large inline packets.
+		 * The blob contains concatenated {mid, pid, size, rsv, data}.
+		 */
 		{
-			struct afe_port_cmd_set_param_v2 *param;
-			struct apr_pkt *pkt;
-			int pkt_size = APR_HDR_SIZE + sizeof(*param) + blob_sz;
-			void *p = kzalloc(pkt_size, GFP_KERNEL);
-			if (!p) { kfree(blob); ret = -ENOMEM; goto out; }
-			pkt = p;
-			param = p + APR_HDR_SIZE;
-			memcpy(p + APR_HDR_SIZE + sizeof(*param), blob, blob_sz);
-			pkt->hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
-				APR_HDR_LEN(APR_HDR_SIZE), APR_PKT_VER);
-			pkt->hdr.pkt_size = pkt_size;
-			pkt->hdr.src_port = 0;
-			pkt->hdr.dest_port = 0;
-			pkt->hdr.token = port->token;
-			pkt->hdr.opcode = AFE_PORT_CMD_SET_PARAM_V2;
-			param->port_id = port->id;
-			param->payload_size = blob_sz;
-			param->payload_address_lsw = 0;
-			param->payload_address_msw = 0;
-			param->mem_map_handle = 0;
-			ret = afe_apr_send_pkt(afe, pkt, port, AFE_PORT_CMD_SET_PARAM_V2);
-			if (ret)
-				dev_warn(afe->dev, "ACDB AFE cal send failed: %d\n", ret);
-			else
-				dev_info(afe->dev, "ACDB AFE cal sent OK\n");
-			kfree(p);
+			u8 *p = blob;
+			int ok = 0;
+
+			for (j = 0; j < npairs && p < blob + blob_sz; j++) {
+				u32 mid = le32_to_cpup((__le32 *)p);
+				u32 pid = le32_to_cpup((__le32 *)(p + 4));
+				u16 dsz = le16_to_cpup((__le16 *)(p + 8));
+				void *data = p + 12;
+
+				ret = q6afe_port_set_param_v2(port, data,
+							      pid, mid, dsz);
+				if (ret)
+					dev_info(afe->dev,
+						 "ACDB cal[%d] mid=0x%x pid=0x%x sz=%u: %d\n",
+						 j, mid, pid, dsz, ret);
+				else
+					ok++;
+
+				p += 12 + ALIGN(dsz, 4);
+			}
+			dev_info(afe->dev, "ACDB: %d/%u params sent OK\n",
+				 ok, npairs);
 		}
 		kfree(blob);
 		goto out;
@@ -2001,7 +2003,12 @@ int q6afe_port_start(struct q6afe_port *port)
 
 	/* Send topology ID for SLIMbus ports */
 	if (port_id == 0x4001 || port_id == 0x4000) {
-		u32 topology = 0;
+		/* Use DEFAULT_COPP_TOPOLOGY instead of passthrough.
+		 * With topology=0, the ADSP loads no audio processing
+		 * modules, so calibration params have no target and
+		 * the codec RX path may not be enabled.
+		 */
+		u32 topology = 0x00010314;
 
 		ret = q6afe_port_set_param_v2(port, &topology,
 					      AFE_PARAM_ID_SET_TOPOLOGY,
