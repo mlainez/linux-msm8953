@@ -6,6 +6,7 @@
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/firmware.h>
+#include <linux/dma-mapping.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
 #include <linux/jiffies.h>
@@ -394,6 +395,7 @@ struct q6afe {
 	struct list_head port_list;
 	spinlock_t port_list_lock;
 	bool slim_slave_cfg_sent;
+	u32 mmap_handle;
 };
 
 struct afe_port_cmd_device_start {
@@ -994,6 +996,7 @@ static int q6afe_callback(struct apr_device *adev, struct apr_resp_pkt *data)
 		case AFE_PORT_CMD_DEVICE_STOP:
 		case AFE_PORT_CMD_DEVICE_START:
 		case AFE_SVC_CMD_SET_PARAM:
+		case 0x000100EA: /* AFE_SERVICE_CMD_SHARED_MEM_MAP_REGIONS */
 			port = q6afe_find_port(afe, hdr->token);
 			if (port) {
 				port->result = *res;
@@ -1005,7 +1008,8 @@ static int q6afe_callback(struct apr_device *adev, struct apr_resp_pkt *data)
 			}
 			break;
 		default:
-			dev_err(afe->dev, "Unknown cmd 0x%x\n",	res->opcode);
+			dev_info(afe->dev, "APR RSP unknown cmd=0x%x status=0x%x token=%d\n",
+				 res->opcode, res->status, hdr->token);
 			break;
 		}
 	}
@@ -1015,7 +1019,18 @@ static int q6afe_callback(struct apr_device *adev, struct apr_resp_pkt *data)
 		afe->result.status = res->status;
 		wake_up(&afe->wait);
 		break;
+	case 0x000100EB: /* AFE_SERVICE_CMDRSP_SHARED_MEM_MAP_REGIONS */
+		afe->mmap_handle = *((u32 *)data->payload);
+		/* Set opcode to the COMMAND we sent, not the response opcode,
+		 * so the waiter's condition (result->opcode == rsp_opcode) matches */
+		afe->result.opcode = 0x000100EA;
+		afe->result.status = 0;
+		dev_info(afe->dev, "AFE mmap_handle = 0x%x\n", afe->mmap_handle);
+		wake_up(&afe->wait);
+		break;
 	default:
+		dev_info(afe->dev, "APR unhandled opcode=0x%x token=%d\n",
+			 hdr->opcode, hdr->token);
 		break;
 	}
 
@@ -1684,6 +1699,123 @@ static const u8 *acdb_find_tag(const u8 *data, size_t len, const char *tag)
 	return NULL;
 }
 
+static int q6afe_map_memory(struct q6afe *afe, dma_addr_t phys, u32 size)
+{
+	struct {
+		struct apr_hdr hdr;
+		u16 mem_pool_id;
+		u16 num_regions;
+		u32 property_flag;
+		u32 shm_addr_lsw;
+		u32 shm_addr_msw;
+		u32 mem_size_bytes;
+	} __packed cmd = {};
+	int ret;
+
+	cmd.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
+					   APR_HDR_LEN(APR_HDR_SIZE),
+					   APR_PKT_VER);
+	cmd.hdr.pkt_size = sizeof(cmd);
+	cmd.hdr.src_port = 0;
+	cmd.hdr.dest_port = 0;
+	cmd.hdr.token = AFE_CLK_TOKEN;
+	cmd.hdr.opcode = 0x000100EA; /* AFE_SERVICE_CMD_SHARED_MEM_MAP_REGIONS */
+	cmd.mem_pool_id = 3; /* ADSP_MEMORY_MAP_SHMEM8_4K_POOL */
+	cmd.num_regions = 1;
+	cmd.property_flag = 0;
+	cmd.shm_addr_lsw = lower_32_bits(phys);
+	cmd.shm_addr_msw = upper_32_bits(phys);
+	cmd.mem_size_bytes = PAGE_ALIGN(size);
+
+	afe->mmap_handle = 0;
+	ret = afe_apr_send_pkt(afe, (struct apr_pkt *)&cmd, NULL,
+			       0x000100EA);
+	if (ret) {
+		dev_err(afe->dev, "AFE SHARED_MEM_MAP failed: %d\n", ret);
+		return ret;
+	}
+
+	if (!afe->mmap_handle) {
+		dev_err(afe->dev, "AFE SHARED_MEM_MAP: no handle returned\n");
+		return -EINVAL;
+	}
+
+	dev_info(afe->dev, "AFE memory mapped: phys=0x%pad size=%u handle=0x%x\n",
+		 &phys, size, afe->mmap_handle);
+	return 0;
+}
+
+static int q6afe_send_cal_via_shmem(struct q6afe *afe, struct q6afe_port *port,
+				    void *cal_data, u32 cal_size)
+{
+	struct afe_port_cmd_set_param_v2 *param;
+	struct apr_pkt *pkt;
+	dma_addr_t phys;
+	void *virt;
+	int ret, pkt_size;
+
+	/* Allocate physically contiguous memory for cal data.
+	 * The ADSP reads from physical address, so we need contiguous pages.
+	 */
+	{
+		struct page *pg;
+		int order = get_order(PAGE_ALIGN(cal_size));
+
+		pg = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+		if (!pg)
+			return -ENOMEM;
+		virt = page_address(pg);
+		phys = page_to_phys(pg);
+	}
+	if (!virt)
+		return -ENOMEM;
+
+	memcpy(virt, cal_data, cal_size);
+
+	/* Map to ADSP */
+	ret = q6afe_map_memory(afe, phys, cal_size);
+	if (ret)
+		goto free_mem;
+
+	/* Send SET_PARAM_V2 referencing the shared memory */
+	pkt_size = APR_HDR_SIZE + sizeof(*param);
+	pkt = kzalloc(pkt_size, GFP_KERNEL);
+	if (!pkt) {
+		ret = -ENOMEM;
+		goto free_mem;
+	}
+
+	param = (void *)pkt + APR_HDR_SIZE;
+	pkt->hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
+					    APR_HDR_LEN(APR_HDR_SIZE),
+					    APR_PKT_VER);
+	pkt->hdr.pkt_size = pkt_size;
+	pkt->hdr.src_port = 0;
+	pkt->hdr.dest_port = 0;
+	pkt->hdr.token = port->token;
+	pkt->hdr.opcode = AFE_PORT_CMD_SET_PARAM_V2;
+	param->port_id = port->id;
+	param->payload_size = cal_size;
+	param->payload_address_lsw = lower_32_bits(phys);
+	param->payload_address_msw = upper_32_bits(phys);
+	param->mem_map_handle = afe->mmap_handle;
+
+	dev_info(afe->dev,
+		 "AFE cal via shmem: port=0x%x size=%u phys=0x%pad handle=0x%x\n",
+		 port->id, cal_size, &phys, afe->mmap_handle);
+
+	ret = afe_apr_send_pkt(afe, pkt, port, AFE_PORT_CMD_SET_PARAM_V2);
+	if (ret)
+		dev_err(afe->dev, "AFE cal shmem send failed: %d\n", ret);
+	else
+		dev_info(afe->dev, "AFE cal via shmem: SUCCESS\n");
+
+	kfree(pkt);
+free_mem:
+	free_pages((unsigned long)virt, get_order(PAGE_ALIGN(cal_size)));
+	return ret;
+}
+
 static int q6afe_send_acdb_afe_cal(struct q6afe *afe, struct q6afe_port *port,
 				   u32 acdb_dev_id, u32 sample_rate)
 {
@@ -1767,39 +1899,29 @@ static int q6afe_send_acdb_afe_cal(struct q6afe *afe, struct q6afe_port *port,
 			bp += ALIGN(dsz, 4);
 		}
 
+		/* Log module IDs in this cal blob */
+		{
+			u8 *p = blob;
+
+			for (j = 0; j < npairs && p < blob + blob_sz; j++) {
+				u32 m = le32_to_cpup((__le32 *)p);
+				u32 pid2 = le32_to_cpup((__le32 *)(p + 4));
+				u16 sz = le16_to_cpup((__le16 *)(p + 8));
+
+				dev_info(afe->dev,
+					 "ACDB cal[%d]: mid=0x%x pid=0x%x sz=%u\n",
+					 j, m, pid2, sz);
+				p += 12 + ALIGN(sz, 4);
+			}
+		}
 		dev_info(afe->dev,
 			 "ACDB: sending AFE cal dev=%u rate=%u (%u bytes, %u params)\n",
 			 did, rate, blob_sz, npairs);
 
-		/*
-		 * Send each calibration param individually via
-		 * q6afe_port_set_param_v2 to avoid large inline packets.
-		 * The blob contains concatenated {mid, pid, size, rsv, data}.
-		 */
-		{
-			u8 *p = blob;
-			int ok = 0;
-
-			for (j = 0; j < npairs && p < blob + blob_sz; j++) {
-				u32 mid = le32_to_cpup((__le32 *)p);
-				u32 pid = le32_to_cpup((__le32 *)(p + 4));
-				u16 dsz = le16_to_cpup((__le16 *)(p + 8));
-				void *data = p + 12;
-
-				ret = q6afe_port_set_param_v2(port, data,
-							      pid, mid, dsz);
-				if (ret)
-					dev_info(afe->dev,
-						 "ACDB cal[%d] mid=0x%x pid=0x%x sz=%u: %d\n",
-						 j, mid, pid, dsz, ret);
-				else
-					ok++;
-
-				p += 12 + ALIGN(dsz, 4);
-			}
-			dev_info(afe->dev, "ACDB: %d/%u params sent OK\n",
-				 ok, npairs);
-		}
+		/* Send cal via shared memory (matching downstream) */
+		ret = q6afe_send_cal_via_shmem(afe, port, blob, blob_sz);
+		if (ret)
+			dev_warn(afe->dev, "ACDB shmem cal failed: %d\n", ret);
 		kfree(blob);
 		goto out;
 	}
@@ -1993,9 +2115,10 @@ int q6afe_port_start(struct q6afe_port *port)
 			 sc->shared_ch_mapping[2], sc->shared_ch_mapping[3]);
 	}
 
-	/* ACDB AFE calibration: disabled for now — cal params timeout
-	 * because the modules aren't loaded. Need shared memory approach
-	 * or correct topology/device ID mapping.
+	/* ACDB AFE cal: infrastructure ready (shared memory works) but
+	 * earpiece doesn't need AFE-level cal — downstream also skips it.
+	 * The ADSP rejects module-specific cal with EBADPARAM when no
+	 * topology is loaded, and downstream also runs without topology.
 	 */
 
 	/* Send topology ID for SLIMbus ports */
