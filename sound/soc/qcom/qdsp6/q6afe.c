@@ -1735,34 +1735,31 @@ static int q6afe_send_cdc_slimbus_slave_cfg(struct q6afe *afe)
 			{ 1, 0x800 + 0x40, SB_PGD_PORT_RX_ENABLE_N, 0x01, 8, 1 },
 		};
 
-		/* Send all CDC_REG_CFG entries in a single packet.
-		 * Format: pdata header + payload where payload =
-		 * num_registers(u32) + reg_cfg[0..N-1]
+		/*
+		 * Send each CDC_REG_CFG entry individually.
+		 * Downstream sends one param_data per entry, not a batch.
 		 */
 		{
-			int nregs = ARRAY_SIZE(cdc_regs);
-			int payload_sz = sizeof(u32) + nregs * sizeof(cdc_regs[0]);
-			u8 *payload = kzalloc(payload_sz, GFP_KERNEL);
+			int i, nregs = ARRAY_SIZE(cdc_regs);
 
-			if (payload) {
-				*((u32 *)payload) = cpu_to_le32(nregs);
-				memcpy(payload + sizeof(u32), cdc_regs,
-				       nregs * sizeof(cdc_regs[0]));
-
-				ret = q6afe_set_param(afe, NULL, payload,
+			for (i = 0; i < nregs; i++) {
+				ret = q6afe_set_param(afe, NULL,
+						      (void *)&cdc_regs[i],
 						      AFE_PARAM_ID_CDC_REG_CFG,
 						      AFE_MODULE_CDC_DEV_CFG,
-						      payload_sz, AFE_CLK_TOKEN);
-				if (ret)
+						      sizeof(cdc_regs[i]),
+						      AFE_CLK_TOKEN);
+				if (ret) {
 					dev_warn(afe->dev,
-						 "CDC_REG_CFG batch failed: %d\n",
-						 ret);
-				else
-					dev_info(afe->dev,
-						 "CDC_REG_CFG: sent %d entries OK\n",
-						 nregs);
-				kfree(payload);
+						 "CDC_REG_CFG[%d] failed: %d\n",
+						 i, ret);
+					break;
+				}
 			}
+			if (!ret)
+				dev_info(afe->dev,
+					 "CDC_REG_CFG: sent %d entries OK\n",
+					 nregs);
 		}
 	}
 
@@ -1792,12 +1789,19 @@ int q6afe_port_start(struct q6afe_port *port)
 	void *p __free(kfree) = NULL;
 
 	/*
-	 * CDC SLIMbus slave config: skip on MSM8953/SDM632.
-	 * The AFE_MODULE_CDC_DEV_CFG (0x00010234) module is not supported
-	 * by the MSM8953 ADSP firmware — it returns ADSP_EBADPARAM.
-	 * The downstream kernel does not send this command at all.
-	 * Skipping avoids a 3s ACDB calibration timeout.
+	 * Send CDC SLIMbus slave config + register config once.
+	 * Downstream techpack sends this during codec init via
+	 * AFE_SVC_CMD_SET_PARAM with AFE_MODULE_CDC_DEV_CFG.
 	 */
+	if ((port_id == 0x4001 || port_id == 0x4000) &&
+	    !afe->slim_slave_cfg_sent) {
+		ret = q6afe_send_cdc_slimbus_slave_cfg(afe);
+		if (ret)
+			dev_warn(afe->dev,
+				 "CDC slave cfg failed: %d (non-fatal)\n", ret);
+		else
+			afe->slim_slave_cfg_sent = true;
+	}
 
 	/* Debug: dump SLIMbus AFE config before sending */
 	if (port_id == 0x4001 || port_id == 0x4000) {
