@@ -5,6 +5,7 @@
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
+#include <linux/firmware.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
 #include <linux/jiffies.h>
@@ -1668,6 +1669,148 @@ void q6afe_cdc_dma_port_prepare(struct q6afe_port *port,
 EXPORT_SYMBOL_GPL(q6afe_cdc_dma_port_prepare);
 
 /*
+ * Minimal ACDB AFE calibration loader.
+ * Parses ACDB file sections (AFECLUT0, AFECCDFT, AFECCDOT, DATAPOOL)
+ * and sends the calibration blob inline via AFE_PORT_CMD_SET_PARAM_V2.
+ */
+static const u8 *acdb_find_tag(const u8 *data, size_t len, const char *tag)
+{
+	size_t tlen = strlen(tag);
+	const u8 *p;
+
+	for (p = data; p < data + len - tlen - 4; p++)
+		if (memcmp(p, tag, tlen) == 0)
+			return p;
+	return NULL;
+}
+
+static int q6afe_send_acdb_afe_cal(struct q6afe *afe, struct q6afe_port *port,
+				   u32 acdb_dev_id, u32 sample_rate)
+{
+	const struct firmware *fw;
+	const char *fname = "acdbdata/MTP_WCD9335_Handset_cal.acdb";
+	const u8 *lut_p, *cdft_p, *cdot_p, *pool_p;
+	u32 lut_sz, cdft_sz, cdot_sz, pool_sz;
+	u32 num_lut, i;
+	int ret = -ENOENT;
+
+	ret = request_firmware(&fw, fname, afe->dev);
+	if (ret) {
+		dev_info(afe->dev, "ACDB %s not found (%d), skipping cal\n",
+			 fname, ret);
+		return 0;
+	}
+
+	dev_info(afe->dev, "ACDB: loaded %s (%zu bytes)\n", fname, fw->size);
+
+	lut_p = acdb_find_tag(fw->data, fw->size, "AFECLUT0");
+	cdft_p = acdb_find_tag(fw->data, fw->size, "AFECCDFT");
+	cdot_p = acdb_find_tag(fw->data, fw->size, "AFECCDOT");
+	pool_p = acdb_find_tag(fw->data, fw->size, "DATAPOOL");
+	if (!lut_p || !cdft_p || !cdot_p || !pool_p) {
+		dev_warn(afe->dev, "ACDB: missing sections\n");
+		ret = 0;
+		goto out;
+	}
+
+	lut_sz = le32_to_cpup((__le32 *)(lut_p + 8)); lut_p += 12;
+	cdft_sz = le32_to_cpup((__le32 *)(cdft_p + 8)); cdft_p += 12;
+	cdot_sz = le32_to_cpup((__le32 *)(cdot_p + 8)); cdot_p += 12;
+	pool_sz = le32_to_cpup((__le32 *)(pool_p + 8)); pool_p += 12;
+
+	num_lut = le32_to_cpup((__le32 *)lut_p);
+	dev_info(afe->dev, "ACDB: AFECLUT0 has %u entries\n", num_lut);
+
+	for (i = 0; i < num_lut; i++) {
+		const u8 *entry = lut_p + 4 + i * 16;
+		u32 did = le32_to_cpup((__le32 *)(entry));
+		u32 rate = le32_to_cpup((__le32 *)(entry + 4));
+		u32 cdft_ofs = le32_to_cpup((__le32 *)(entry + 8));
+		u32 cdot_ofs = le32_to_cpup((__le32 *)(entry + 12));
+		u32 npairs, j, blob_sz = 0;
+		u8 *blob, *bp;
+
+		if (did != acdb_dev_id || rate != sample_rate)
+			continue;
+
+		if (cdft_ofs + 4 > cdft_sz) continue;
+		npairs = le32_to_cpup((__le32 *)(cdft_p + cdft_ofs));
+		if (cdft_ofs + 4 + npairs * 8 > cdft_sz) continue;
+		if (cdot_ofs + 4 > cdot_sz) continue;
+
+		for (j = 0; j < npairs; j++) {
+			u32 pool_ofs = le32_to_cpup((__le32 *)(cdot_p + cdot_ofs + 4 + j * 4));
+			u32 dsz;
+			if (pool_ofs + 4 > pool_sz) continue;
+			dsz = le32_to_cpup((__le32 *)(pool_p + pool_ofs));
+			blob_sz += 12 + ALIGN(dsz, 4);
+		}
+		if (blob_sz == 0) continue;
+
+		blob = kzalloc(blob_sz, GFP_KERNEL);
+		if (!blob) { ret = -ENOMEM; goto out; }
+
+		bp = blob;
+		for (j = 0; j < npairs; j++) {
+			u32 mid = le32_to_cpup((__le32 *)(cdft_p + cdft_ofs + 4 + j * 8));
+			u32 pid = le32_to_cpup((__le32 *)(cdft_p + cdft_ofs + 4 + j * 8 + 4));
+			u32 pool_ofs = le32_to_cpup((__le32 *)(cdot_p + cdot_ofs + 4 + j * 4));
+			u32 dsz;
+			if (pool_ofs + 4 > pool_sz) { kfree(blob); goto out; }
+			dsz = le32_to_cpup((__le32 *)(pool_p + pool_ofs));
+			*((u32 *)bp) = cpu_to_le32(mid); bp += 4;
+			*((u32 *)bp) = cpu_to_le32(pid); bp += 4;
+			*((u16 *)bp) = cpu_to_le16(dsz); bp += 2;
+			*((u16 *)bp) = 0; bp += 2;
+			if (dsz > 0 && pool_ofs + 4 + dsz <= pool_sz)
+				memcpy(bp, pool_p + pool_ofs + 4, dsz);
+			bp += ALIGN(dsz, 4);
+		}
+
+		dev_info(afe->dev,
+			 "ACDB: sending AFE cal dev=%u rate=%u (%u bytes, %u params)\n",
+			 did, rate, blob_sz, npairs);
+		{
+			struct afe_port_cmd_set_param_v2 *param;
+			struct apr_pkt *pkt;
+			int pkt_size = APR_HDR_SIZE + sizeof(*param) + blob_sz;
+			void *p = kzalloc(pkt_size, GFP_KERNEL);
+			if (!p) { kfree(blob); ret = -ENOMEM; goto out; }
+			pkt = p;
+			param = p + APR_HDR_SIZE;
+			memcpy(p + APR_HDR_SIZE + sizeof(*param), blob, blob_sz);
+			pkt->hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
+				APR_HDR_LEN(APR_HDR_SIZE), APR_PKT_VER);
+			pkt->hdr.pkt_size = pkt_size;
+			pkt->hdr.src_port = 0;
+			pkt->hdr.dest_port = 0;
+			pkt->hdr.token = port->token;
+			pkt->hdr.opcode = AFE_PORT_CMD_SET_PARAM_V2;
+			param->port_id = port->id;
+			param->payload_size = blob_sz;
+			param->payload_address_lsw = 0;
+			param->payload_address_msw = 0;
+			param->mem_map_handle = 0;
+			ret = afe_apr_send_pkt(afe, pkt, port, AFE_PORT_CMD_SET_PARAM_V2);
+			if (ret)
+				dev_warn(afe->dev, "ACDB AFE cal send failed: %d\n", ret);
+			else
+				dev_info(afe->dev, "ACDB AFE cal sent OK\n");
+			kfree(p);
+		}
+		kfree(blob);
+		goto out;
+	}
+
+	dev_info(afe->dev, "ACDB: no AFE cal for dev=%u rate=%u\n",
+		 acdb_dev_id, sample_rate);
+	ret = 0;
+out:
+	release_firmware(fw);
+	return ret;
+}
+
+/*
  * Send CDC configuration to ADSP, matching downstream msm8952-slimbus.c
  * ordering: REG_CFG → PAGE_CFG → SLAVE_CFG → (INIT triggered by SLAVE_CFG)
  * → PAGE_CFG again.
@@ -1848,10 +1991,17 @@ int q6afe_port_start(struct q6afe_port *port)
 			 sc->shared_ch_mapping[2], sc->shared_ch_mapping[3]);
 	}
 
-	/* Send topology ID for SLIMbus ports (required by ADSP to set up
-	 * the audio processing chain before DEVICE_START) */
+	/* Send ACDB AFE calibration for SLIMbus RX (earpiece/headphone) */
+	if (port_id == 0x4000) {
+		/* ACDB device ID 7 = handset RX on MSM8953 MTP */
+		q6afe_send_acdb_afe_cal(afe, port, 7, 48000);
+		/* Also try common device IDs */
+		q6afe_send_acdb_afe_cal(afe, port, 104, 48000);
+	}
+
+	/* Send topology ID for SLIMbus ports */
 	if (port_id == 0x4001 || port_id == 0x4000) {
-		u32 topology = 0; /* passthrough — no ACDB calibration */
+		u32 topology = 0;
 
 		ret = q6afe_port_set_param_v2(port, &topology,
 					      AFE_PARAM_ID_SET_TOPOLOGY,
