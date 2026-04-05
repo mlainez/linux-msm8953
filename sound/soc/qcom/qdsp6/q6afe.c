@@ -1828,6 +1828,35 @@ int q6afe_port_start(struct q6afe_port *port)
 				 port_id, ret);
 	}
 
+	/* Send PORT_MEDIA_TYPE for SLIMbus ports (required by ADSP to
+	 * configure the audio data path before DEVICE_START) */
+	if (port_id == 0x4001 || port_id == 0x4000) {
+		struct {
+			u32 minor_version;
+			u32 sample_rate;
+			u16 bit_width;
+			u16 num_channels;
+			u16 data_format;
+			u16 reserved;
+		} __packed media_type = {
+			.minor_version = 1,
+			.sample_rate = port->port_cfg.slim_cfg.sample_rate,
+			.bit_width = port->port_cfg.slim_cfg.bit_width,
+			.num_channels = port->port_cfg.slim_cfg.num_channels,
+			.data_format = 0, /* AFE_PORT_DATA_FORMAT_PCM */
+			.reserved = 0,
+		};
+
+		ret = q6afe_port_set_param_v2(port, &media_type,
+					      0x000102a7, /* AFE_PARAM_ID_PORT_MEDIA_TYPE */
+					      0x000102a6, /* AFE_MODULE_PORT */
+					      sizeof(media_type));
+		if (ret)
+			dev_warn(afe->dev,
+				 "AFE PORT_MEDIA_TYPE for port 0x%x: %d\n",
+				 port_id, ret);
+	}
+
 	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
 				       AFE_MODULE_AUDIO_DEV_INTERFACE,
 				       sizeof(port->port_cfg));
