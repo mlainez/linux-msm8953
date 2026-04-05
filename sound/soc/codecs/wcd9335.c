@@ -1205,6 +1205,16 @@ static int slim_rx_mux_put(struct snd_kcontrol *kc,
 		list_add_tail(&wcd->rx_chs[port_id].list,
 			      &wcd->dai[AIF4_PB].slim_ch_list);
 		break;
+	case 5:
+		/*
+		 * AIF_MIX1_PB: use ports at +2 offset from the base port.
+		 * E.g. SLIM RX0 normally uses port 0 (ch 144), but with
+		 * AIF_MIX1_PB it uses port 2 (ch 146), matching downstream
+		 * earpiece path (port 18/19, channel 146/147).
+		 */
+		list_add_tail(&wcd->rx_chs[port_id + 2].list,
+			      &wcd->dai[AIF1_PB].slim_ch_list);
+		break;
 	default:
 		dev_err(wcd->dev, "Unknown AIF %d\n",
 			wcd->rx_port_value[port_id]);
