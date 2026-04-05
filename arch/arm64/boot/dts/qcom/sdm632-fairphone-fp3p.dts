@@ -12,6 +12,8 @@
 /dts-v1/;
 
 #include <dt-bindings/leds/common.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/sound/qcom,wcd9335.h>
 #include "sdm632.dtsi"
 #include "pm8953.dtsi"
 #include "pmi632.dtsi"
@@ -56,6 +58,15 @@
 		regulator-name = "vph_pwr";
 		regulator-always-on;
 		regulator-boot-on;
+	};
+
+	divclk2_codec: divclk2 {
+		compatible = "gpio-gate-clock";
+		clocks = <&rpmcc RPM_SMD_DIV_CLK2>;
+		#clock-cells = <0>;
+		enable-gpios = <&pm8953_gpios 1 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&tasha_mclk_default>;
 	};
 };
 
@@ -127,6 +138,53 @@
 	firmware-name = "qcom/msm8953/fairphone/fp3/adsp.mbn";
 
 	status = "okay";
+};
+
+&slim_msm {
+	status = "okay";
+
+	slim@1 {
+		reg = <1>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		tasha_ifd: tas-ifd@0,0 {
+			compatible = "slim217,1a0";
+			reg = <0 0>;
+		};
+
+		wcd9335: codec@1,0 {
+			compatible = "slim217,1a0";
+			reg = <1 0>;
+
+			clock-names = "mclk", "slimbus";
+			clocks = <&divclk2_codec>,
+				 <&rpmcc RPM_SMD_BB_CLK1>;
+
+			interrupt-parent = <&tlmm>;
+			interrupts = <73 IRQ_TYPE_LEVEL_HIGH>,
+				     <73 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "intr1", "intr2";
+			interrupt-controller;
+			#interrupt-cells = <1>;
+
+			pinctrl-0 = <&wcd_reset_active &wcd_intr_default>;
+			pinctrl-names = "default";
+
+			reset-gpios = <&tlmm 67 GPIO_ACTIVE_LOW>;
+			slim-ifc-dev = <&tasha_ifd>;
+
+			#sound-dai-cells = <1>;
+
+			vdd-buck-supply = <&pm8953_l5>;
+			vdd-buck-sido-supply = <&pm8953_l5>;
+			vdd-rx-supply = <&pm8953_l5>;
+			vdd-tx-supply = <&pm8953_l5>;
+			vdd-io-supply = <&pm8953_l5>;
+			vdd-vbat-supply = <&vph_pwr>;
+			vdd-micbias-supply = <&pm8953_l13>;
+		};
+	};
 };
 
 &mdss {
@@ -272,11 +330,26 @@
 
 	status = "okay";
 
+	/* FP3+ does not use the codec on PM8953 */
+	/delete-property/ audio-routing;
+
+	/*
+	 * WCD9335 routes (enable when SLIM DAI links are active):
+	 *	"RX_BIAS", "MCLK",
+	 *	"AMIC2", "MIC BIAS2",
+	 *	"AMIC5", "MIC BIAS3",
+	 *	"AMIC5", "Handset Mic",
+	 *	"AMIC2", "Headset Mic",
+	 *	"Headphone Jack", "HPHL",
+	 *	"Headphone Jack", "HPHR",
+	 *	"EAR", "EAR PA",
+	 *	"DMIC1", "Digital Mic1",
+	 *	"DMIC2", "Digital Mic2",
+	 */
 	audio-routing = "Speaker", "OUT";
 	widgets = "Speaker", "Speaker";
 	pin-switches = "Speaker";
 
-	/* FP3+ does not use the codec on PM8953 */
 	/delete-node/ primary-mi2s-dai-link;
 	/delete-node/ tertiary-mi2s-dai-link;
 
@@ -295,6 +368,24 @@
 			sound-dai = <&q6routing>;
 		};
 	};
+
+	/*
+	 * SLIM DAI links disabled until SLIMbus enumeration works.
+	 * WCD9335 codec DAI not available blocks entire sound card.
+	 *
+	 * slim-dai-link {
+	 *	link-name = "SLIM Playback";
+	 *	cpu { sound-dai = <&q6afedai SLIMBUS_0_RX>; };
+	 *	platform { sound-dai = <&q6routing>; };
+	 *	codec { sound-dai = <&wcd9335 AIF1_PB>; };
+	 * };
+	 * slimcap-dai-link {
+	 *	link-name = "SLIM Capture";
+	 *	cpu { sound-dai = <&q6afedai SLIMBUS_0_TX>; };
+	 *	platform { sound-dai = <&q6routing>; };
+	 *	codec { sound-dai = <&wcd9335 AIF1_CAP>; };
+	 * };
+	 */
 };
 
 &rpm_requests {
@@ -448,6 +539,20 @@
 		drive-strength = <2>;
 		bias-pull-down;
 	};
+
+	wcd_reset_active: wcd-reset-active-state {
+		pins = "gpio67";
+		function = "gpio";
+		drive-strength = <16>;
+		output-high;
+	};
+
+	wcd_intr_default: wcd-intr-default-state {
+		pins = "gpio73";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
 };
 
 /*
@@ -456,6 +561,16 @@
  */
 &i2c_6_sleep {
 	function = "blsp_i2c6";
+};
+
+&pm8953_gpios {
+	tasha_mclk_default: tasha-mclk-default-state {
+		pins = "gpio1";
+		function = "func1";
+		bias-disable;
+		power-source = <0>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+	};
 };
 
 &uart_0 {
