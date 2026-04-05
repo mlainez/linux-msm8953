@@ -1260,9 +1260,36 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 	if (ret) {
 		slim_free_txn_tid(ctrl, &txn);
 		dev_err(&sdev->dev, "RECONFIG_NOW failed: %d\n", ret);
+		return ret;
 	}
 
-	return ret;
+	/*
+	 * Enable PGD data ports. Without this, the SLIMbus data channels
+	 * are connected (CONNECT ACKed) but no audio data flows.
+	 * The PGD port enable writes directly to hardware registers,
+	 * bypassing the ADSP proxy.
+	 */
+	/*
+	 * Enable PGD data ports from apps_pipes bitmask.
+	 * apps_pipes=0x600000 → bits 21,22 → PGD ports 14,15 (pipe - 7).
+	 */
+	{
+		int pipe, n = 0;
+
+		for (pipe = 7; pipe < 32 && n < rt->num_ports; pipe++) {
+			if ((dev->apps_pipes >> pipe) & 1) {
+				int pgd_port = pipe - 7;
+
+				dev_info(ctrl->dev,
+					 "Enabling PGD port %d (pipe %d) for stream\n",
+					 pgd_port, pipe);
+				msm8953_slim_enable_pgd_port(dev, pgd_port, n);
+				n++;
+			}
+		}
+	}
+
+	return 0;
 }
 
 /* ---- REPORT_SATELLITE send ---------------------------------------------- */
