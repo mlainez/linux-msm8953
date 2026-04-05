@@ -1667,49 +1667,20 @@ void q6afe_cdc_dma_port_prepare(struct q6afe_port *port,
 }
 EXPORT_SYMBOL_GPL(q6afe_cdc_dma_port_prepare);
 
+/*
+ * Send CDC configuration to ADSP, matching downstream msm8952-slimbus.c
+ * ordering: REG_CFG → PAGE_CFG → SLAVE_CFG → (INIT triggered by SLAVE_CFG)
+ * → PAGE_CFG again.
+ *
+ * Downstream sends REG_CFG BEFORE SLAVE_CFG. This matters because
+ * SLAVE_CFG triggers REG_CFG_INIT internally.
+ */
 static int q6afe_send_cdc_slimbus_slave_cfg(struct q6afe *afe)
 {
-	struct afe_param_cdc_slimbus_slave_cfg cfg = {};
-	int ret;
+	struct afe_param_cdc_slimbus_slave_cfg slave_cfg = {};
+	int ret, i;
 
-	/*
-	 * WCD9335 (Tasha) SLIMbus enumeration address:
-	 * struct slim_eaddr is packed as {instance, dev_index, prod_code, manf_id}
-	 * For WCD9335 codec device: instance=0, dev_index=1, prod_code=0x01a0, manf_id=0x0217
-	 * As bytes on LE: [0x00, 0x01, 0xa0, 0x01, 0x17, 0x02]
-	 */
-	cfg.minor_version = 1;
-	cfg.device_enum_addr_lsw = 0x01a00100;  /* bytes 0-3: inst=0x00, idx=0x01, prod=0x01a0 */
-	cfg.device_enum_addr_msw = 0x0217;       /* bytes 4-5: manf=0x0217 */
-	cfg.tx_slave_port_offset = 0;
-	cfg.rx_slave_port_offset = 16;
-
-	dev_info(afe->dev,
-		 "Sending CDC SLIMbus slave cfg: eaddr=0x%x:0x%x tx_off=%d rx_off=%d\n",
-		 cfg.device_enum_addr_msw, cfg.device_enum_addr_lsw,
-		 cfg.tx_slave_port_offset, cfg.rx_slave_port_offset);
-
-	ret = q6afe_set_param(afe, NULL, &cfg,
-			      AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG,
-			      AFE_MODULE_CDC_DEV_CFG,
-			      sizeof(cfg), AFE_CLK_TOKEN);
-	if (ret) {
-		dev_err(afe->dev, "CDC slave cfg failed: %d\n", ret);
-		return ret;
-	}
-
-	/*
-	 * Send CDC_REG_CFG entries for SLIMbus PGD port configuration.
-	 * These tell the ADSP the WCD9335 register addresses for enabling
-	 * and configuring the SLIMbus data ports. Without these, the ADSP
-	 * doesn't know how to set up the SLIMbus data channel.
-	 *
-	 * Struct: { minor_ver(u32), reg_addr(u32), field_type(u32),
-	 *           bit_mask(u32), bit_width(u16), offset_scale(u16) }
-	 * TASHA_REGISTER_START_OFFSET = 0x800
-	 * TASHA_SB_PGD_PORT_TX_BASE = 0x50
-	 * TASHA_SB_PGD_PORT_RX_BASE = 0x40
-	 */
+	/* --- Step 1: CDC_REG_CFG entries (PGD port register metadata) --- */
 	{
 		struct afe_param_cdc_reg_cfg_t {
 			u32 minor_version;
@@ -1720,55 +1691,81 @@ static int q6afe_send_cdc_slimbus_slave_cfg(struct q6afe *afe)
 			u16 reg_offset_scale;
 		} __packed;
 
-		/* Field type enums matching downstream wcd9xxx-common-v2.h */
-		enum {
-			SB_PGD_PORT_TX_WATERMARK_N = 196,
-			SB_PGD_PORT_TX_ENABLE_N = 197,
-			SB_PGD_PORT_RX_WATERMARK_N = 198,
-			SB_PGD_PORT_RX_ENABLE_N = 199,
-		};
-
 		static const struct afe_param_cdc_reg_cfg_t cdc_regs[] = {
-			{ 1, 0x800 + 0x50, SB_PGD_PORT_TX_WATERMARK_N, 0x1E, 8, 1 },
-			{ 1, 0x800 + 0x50, SB_PGD_PORT_TX_ENABLE_N, 0x01, 8, 1 },
-			{ 1, 0x800 + 0x40, SB_PGD_PORT_RX_WATERMARK_N, 0x1E, 8, 1 },
-			{ 1, 0x800 + 0x40, SB_PGD_PORT_RX_ENABLE_N, 0x01, 8, 1 },
+			{ 1, 0x850, 196, 0x1E, 8, 1 }, /* TX watermark */
+			{ 1, 0x850, 197, 0x01, 8, 1 }, /* TX enable */
+			{ 1, 0x840, 198, 0x1E, 8, 1 }, /* RX watermark */
+			{ 1, 0x840, 199, 0x01, 8, 1 }, /* RX enable */
 		};
+		int ok = 0;
 
-		/*
-		 * Send each CDC_REG_CFG entry individually.
-		 * Downstream sends one param_data per entry, not a batch.
-		 */
-		{
-			int i, nregs = ARRAY_SIZE(cdc_regs);
-
-			for (i = 0; i < nregs; i++) {
-				ret = q6afe_set_param(afe, NULL,
-						      (void *)&cdc_regs[i],
-						      AFE_PARAM_ID_CDC_REG_CFG,
-						      AFE_MODULE_CDC_DEV_CFG,
-						      sizeof(cdc_regs[i]),
-						      AFE_CLK_TOKEN);
-				if (ret) {
-					dev_warn(afe->dev,
-						 "CDC_REG_CFG[%d] failed: %d\n",
-						 i, ret);
-					break;
-				}
-			}
+		for (i = 0; i < ARRAY_SIZE(cdc_regs); i++) {
+			ret = q6afe_set_param(afe, NULL,
+					      (void *)&cdc_regs[i],
+					      AFE_PARAM_ID_CDC_REG_CFG,
+					      AFE_MODULE_CDC_DEV_CFG,
+					      sizeof(cdc_regs[i]),
+					      AFE_CLK_TOKEN);
 			if (!ret)
-				dev_info(afe->dev,
-					 "CDC_REG_CFG: sent %d entries OK\n",
-					 nregs);
+				ok++;
 		}
+		dev_info(afe->dev, "CDC_REG_CFG: %d/%zu accepted\n",
+			 ok, ARRAY_SIZE(cdc_regs));
 	}
 
-	/* Send CDC_REG_CFG_INIT to apply the register config */
-	dev_info(afe->dev, "Sending CDC_REG_CFG_INIT\n");
-	return q6afe_set_param(afe, NULL, NULL,
-			       AFE_PARAM_ID_CDC_REG_CFG_INIT,
-			       AFE_MODULE_CDC_DEV_CFG,
-			       0, AFE_CLK_TOKEN);
+	/* --- Step 2: CDC_REG_PAGE_CFG (before SLAVE_CFG) --- */
+	{
+		struct {
+			u32 minor_version;
+			u32 enable;
+			u32 proc_id;
+		} __packed page_cfg = { 1, 1, 1 };
+
+		ret = q6afe_set_param(afe, NULL, &page_cfg,
+				      0x00010296,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      sizeof(page_cfg), AFE_CLK_TOKEN);
+		dev_info(afe->dev, "CDC_REG_PAGE_CFG: %d\n", ret);
+	}
+
+	/* --- Step 3: CDC_SLIMBUS_SLAVE_CFG --- */
+	slave_cfg.minor_version = 1;
+	slave_cfg.device_enum_addr_lsw = 0x01a00100;
+	slave_cfg.device_enum_addr_msw = 0x0217;
+	slave_cfg.tx_slave_port_offset = 0;
+	slave_cfg.rx_slave_port_offset = 16;
+
+	ret = q6afe_set_param(afe, NULL, &slave_cfg,
+			      AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG,
+			      AFE_MODULE_CDC_DEV_CFG,
+			      sizeof(slave_cfg), AFE_CLK_TOKEN);
+	dev_info(afe->dev, "CDC_SLIMBUS_SLAVE_CFG: %d\n", ret);
+
+	/* --- Step 4: CDC_REG_CFG_INIT (downstream sends after SLAVE_CFG) --- */
+	if (!ret) {
+		ret = q6afe_set_param(afe, NULL, NULL,
+				      AFE_PARAM_ID_CDC_REG_CFG_INIT,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      0, AFE_CLK_TOKEN);
+		dev_info(afe->dev, "CDC_REG_CFG_INIT: %d\n", ret);
+	}
+
+	/* --- Step 5: CDC_REG_PAGE_CFG again (downstream sends twice) --- */
+	{
+		struct {
+			u32 minor_version;
+			u32 enable;
+			u32 proc_id;
+		} __packed page_cfg = { 1, 1, 1 };
+
+		ret = q6afe_set_param(afe, NULL, &page_cfg,
+				      0x00010296,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      sizeof(page_cfg), AFE_CLK_TOKEN);
+		dev_info(afe->dev, "CDC_REG_PAGE_CFG(2): %d\n", ret);
+	}
+
+	return 0; /* non-fatal */
 }
 
 /**
