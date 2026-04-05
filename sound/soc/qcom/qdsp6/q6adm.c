@@ -348,6 +348,7 @@ static int q6adm_device_open(struct q6adm *adm, struct q6copp *copp,
 	open->flags = ADM_LEGACY_DEVICE_SESSION;
 	open->mode_of_operation = path;
 	open->endpoint_id_1 = afe_port;
+	open->endpoint_id_2 = 0xFFFF; /* unused — matches downstream */
 	open->topology_id = topology;
 	open->dev_num_channel = channel_mode & 0x00FF;
 	open->bit_width = bit_width;
@@ -357,6 +358,11 @@ static int q6adm_device_open(struct q6adm *adm, struct q6copp *copp,
 				 channel_mode);
 	if (ret)
 		return ret;
+
+	dev_info(adm->dev,
+		 "ADM DEVICE_OPEN: port=0x%x topo=0x%x ch=%d bw=%d rate=%d path=%d flags=0x%x\n",
+		 afe_port, topology, channel_mode, bit_width, rate,
+		 path, open->flags);
 
 	return q6adm_apr_send_copp_pkt(adm, copp, pkt, ADM_CMDRSP_DEVICE_OPEN_V5);
 }
