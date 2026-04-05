@@ -1993,22 +1993,14 @@ int q6afe_port_start(struct q6afe_port *port)
 			 sc->shared_ch_mapping[2], sc->shared_ch_mapping[3]);
 	}
 
-	/* Send ACDB AFE calibration for SLIMbus RX (earpiece/headphone) */
-	if (port_id == 0x4000) {
-		/* ACDB device ID 7 = handset RX on MSM8953 MTP */
-		q6afe_send_acdb_afe_cal(afe, port, 7, 48000);
-		/* Also try common device IDs */
-		q6afe_send_acdb_afe_cal(afe, port, 104, 48000);
-	}
+	/* ACDB AFE calibration: disabled for now — cal params timeout
+	 * because the modules aren't loaded. Need shared memory approach
+	 * or correct topology/device ID mapping.
+	 */
 
 	/* Send topology ID for SLIMbus ports */
 	if (port_id == 0x4001 || port_id == 0x4000) {
-		/* Use DEFAULT_COPP_TOPOLOGY instead of passthrough.
-		 * With topology=0, the ADSP loads no audio processing
-		 * modules, so calibration params have no target and
-		 * the codec RX path may not be enabled.
-		 */
-		u32 topology = 0x00010314;
+		u32 topology = 0;
 
 		ret = q6afe_port_set_param_v2(port, &topology,
 					      AFE_PARAM_ID_SET_TOPOLOGY,
