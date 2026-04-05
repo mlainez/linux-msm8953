@@ -334,8 +334,6 @@ struct wcd9335_codec {
 
 	int intr1;
 	struct gpio_desc *reset_gpio;
-	struct regulator_bulk_data supplies[6]; /* vdd-buck, sido, tx, rx, io, micbias */
-	int num_supplies;
 
 	unsigned int rx_port_value[WCD9335_RX_MAX];
 	unsigned int tx_port_value[WCD9335_TX_MAX];
@@ -350,6 +348,8 @@ struct wcd9335_codec {
 	int dmic_0_1_clk_cnt;
 	int dmic_2_3_clk_cnt;
 	int dmic_4_5_clk_cnt;
+
+	struct regulator_bulk_data supplies[6];
 };
 
 struct wcd9335_irq {
@@ -547,7 +547,7 @@ static const char *const rx_hph_mode_mux_text[] = {
 };
 
 static const char *const slim_rx_mux_text[] = {
-	"ZERO", "AIF1_PB", "AIF2_PB", "AIF3_PB", "AIF4_PB", "AIF_MIX1_PB",
+	"ZERO", "AIF1_PB", "AIF2_PB", "AIF3_PB", "AIF4_PB",
 };
 
 static const char *const adc_mux_text[] = { "DMIC", "AMIC", "ANC_FB_TUNE1",
@@ -1205,17 +1205,6 @@ static int slim_rx_mux_put(struct snd_kcontrol *kc,
 		list_add_tail(&wcd->rx_chs[port_id].list,
 			      &wcd->dai[AIF4_PB].slim_ch_list);
 		break;
-	case 5:
-		/*
-		 * AIF_MIX1_PB: use ports +2 offset (18/19 instead of 16/17).
-		 * Downstream tasha uses these ports for earpiece playback.
-		 * Remove the base port and add the +2 port instead.
-		 */
-		list_del_init(&wcd->rx_chs[port_id].list);
-		if (port_id + 2 < WCD9335_RX_MAX)
-			list_add_tail(&wcd->rx_chs[port_id + 2].list,
-				      &wcd->dai[AIF1_PB].slim_ch_list);
-		break;
 	default:
 		dev_err(wcd->dev, "Unknown AIF %d\n",
 			wcd->rx_port_value[port_id]);
@@ -1642,53 +1631,52 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 		cfg->chs[i++] = ch->ch_num;
 		if (direction == SNDRV_PCM_STREAM_PLAYBACK) {
 			/*
-			 * PGD port register index: use ch->port directly
-			 * (absolute port number), matching WCD934x driver.
-			 * Write accumulated payload (all channel bits) to
-			 * each port's MULTI_CHNL register.
+			 * PGD port register index: ch->port is the SLIMbus
+			 * logical port (16+), but registers use 0-based index.
+			 * Subtract WCD9335_RX_START to get the register index.
 			 */
-			/*
-			 * Use main regmap (not if_regmap) — both share the
-			 * same SLIMbus page selector at 0x800, and using
-			 * the main regmap avoids paging races.
-			 */
+			u8 pn = ch->port - WCD9335_RX_START;
+			u16 this_ch_bit = 1 << ch->shift;
+
 			ret = regmap_write(
-				wcd->regmap,
-				WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(ch->port),
-				payload);
+				wcd->if_regmap,
+				WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(pn),
+				this_ch_bit);
 
 			if (ret < 0)
 				goto err;
 
 			ret = regmap_write(
-				wcd->regmap,
-				WCD9335_SLIM_PGD_RX_PORT_CFG(ch->port),
+				wcd->if_regmap,
+				WCD9335_SLIM_PGD_RX_PORT_CFG(pn),
 				WCD9335_SLIM_WATER_MARK_VAL);
 			if (ret < 0)
 				goto err;
 
 			dev_info(wcd->dev,
-				 "PGD RX port %d: MULTI_CHNL=0x%x CFG=0x%x\n",
-				 ch->port, payload, WCD9335_SLIM_WATER_MARK_VAL);
+				 "PGD RX port %d: MULTI_CHNL=0x%x (shift=%d) CFG=0x%x\n",
+				 pn, this_ch_bit, ch->shift, WCD9335_SLIM_WATER_MARK_VAL);
 		} else {
-			/* TX: use ch->port directly, write accumulated payload */
+			u8 pn = ch->port; /* TX ports are 0-based already */
+			u16 this_ch_bit = 1 << ch->shift;
+
 			ret = regmap_write(
-				wcd->regmap,
-				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_0(ch->port),
-				payload & 0x00FF);
+				wcd->if_regmap,
+				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_0(pn),
+				this_ch_bit & 0x00FF);
 			if (ret < 0)
 				goto err;
 
 			ret = regmap_write(
-				wcd->regmap,
-				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_1(ch->port),
-				(payload & 0xFF00) >> 8);
+				wcd->if_regmap,
+				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_1(pn),
+				(this_ch_bit & 0xFF00) >> 8);
 			if (ret < 0)
 				goto err;
 
 			ret = regmap_write(
-				wcd->regmap,
-				WCD9335_SLIM_PGD_TX_PORT_CFG(ch->port),
+				wcd->if_regmap,
+				WCD9335_SLIM_PGD_TX_PORT_CFG(pn),
 				WCD9335_SLIM_WATER_MARK_VAL);
 
 			if (ret < 0)
@@ -1696,27 +1684,18 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 		}
 	}
 
-	/* Verify PGD RX register writes reach hardware */
-	if (direction == SNDRV_PCM_STREAM_PLAYBACK) {
-		struct wcd9335_slim_ch *vch;
-		list_for_each_entry(vch, slim_ch_list, list) {
-			unsigned int rb = 0xDE, cfgr = 0xDE;
-			regmap_read(wcd->regmap,
-				    WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(vch->port), &rb);
-			regmap_read(wcd->regmap,
-				    WCD9335_SLIM_PGD_RX_PORT_CFG(vch->port), &cfgr);
-			dev_info(wcd->dev,
-				 "PGD RX verify port %d: MULTI=0x%x CFG=0x%x (wrote MULTI=0x%x CFG=0x%x)\n",
-				 vch->port, rb, cfgr, payload, WCD9335_SLIM_WATER_MARK_VAL);
-		}
+	/* Verify PGD register writes reach hardware */
+	{
+		unsigned int readback = 0xDE;
+
+		regmap_read(wcd->if_regmap,
+			    WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_0(0), &readback);
+		dev_info(wcd->dev,
+			 "PGD TX_PORT_MULTI_CHNL_0(0) write=0x%x readback=0x%x\n",
+			 payload & 0xFF, readback);
 	}
 
 	dai_data->sruntime = slim_stream_allocate(wcd->slim, "WCD9335-SLIM");
-	if (!dai_data->sruntime)
-		dev_err(wcd->dev, "slim_stream_allocate FAILED — sruntime is NULL!\n");
-	else
-		dev_info(wcd->dev, "slim_stream_allocate OK: sruntime=%px\n",
-			 dai_data->sruntime);
 
 	return 0;
 
@@ -1913,30 +1892,17 @@ static int wcd9335_hw_params(struct snd_pcm_substream *substream,
 	{
 		struct wcd_slim_codec_dai_data *dd = &wcd->dai[dai->id];
 
-		dev_info(wcd->dev,
-			 "hw_params: sruntime=%px ch_count=%d port_mask=0x%lx dir=%d rate=%d bps=%d chs=[%d,%d]\n",
-			 dd->sruntime, dd->sconfig.ch_count,
-			 dd->sconfig.port_mask, dd->sconfig.direction,
-			 dd->sconfig.rate, dd->sconfig.bps,
-			 dd->sconfig.chs ? dd->sconfig.chs[0] : -1,
-			 (dd->sconfig.ch_count > 1 && dd->sconfig.chs) ? dd->sconfig.chs[1] : -1);
-
 		if (dd->sruntime) {
 			int ret2;
 
 			ret2 = slim_stream_prepare(dd->sruntime, &dd->sconfig);
 			if (ret2)
-				dev_err(wcd->dev, "hw_params: stream_prepare FAILED: %d\n", ret2);
+				dev_warn(wcd->dev, "hw_params: stream_prepare: %d\n", ret2);
 			else {
-				dev_info(wcd->dev, "hw_params: stream_prepare OK\n");
 				ret2 = slim_stream_enable(dd->sruntime);
 				if (ret2)
-					dev_err(wcd->dev, "hw_params: stream_enable FAILED: %d\n", ret2);
-				else
-					dev_info(wcd->dev, "hw_params: stream_enable OK\n");
+					dev_warn(wcd->dev, "hw_params: stream_enable: %d\n", ret2);
 			}
-		} else {
-			dev_err(wcd->dev, "hw_params: sruntime is NULL, skipping stream setup!\n");
 		}
 	}
 
@@ -2377,15 +2343,6 @@ static const struct snd_soc_dapm_route wcd9335_audio_map[] = {
 	{ "SLIM RX5 MUX", "AIF1_PB", "AIF1 PB" },
 	{ "SLIM RX6 MUX", "AIF1_PB", "AIF1 PB" },
 	{ "SLIM RX7 MUX", "AIF1_PB", "AIF1 PB" },
-	/* AIF_MIX1_PB: downstream earpiece path using ports 18/19 */
-	{ "SLIM RX0 MUX", "AIF_MIX1_PB", "AIF1 PB" },
-	{ "SLIM RX1 MUX", "AIF_MIX1_PB", "AIF1 PB" },
-	{ "SLIM RX2 MUX", "AIF_MIX1_PB", "AIF1 PB" },
-	{ "SLIM RX3 MUX", "AIF_MIX1_PB", "AIF1 PB" },
-	{ "SLIM RX4 MUX", "AIF_MIX1_PB", "AIF1 PB" },
-	{ "SLIM RX5 MUX", "AIF_MIX1_PB", "AIF1 PB" },
-	{ "SLIM RX6 MUX", "AIF_MIX1_PB", "AIF1 PB" },
-	{ "SLIM RX7 MUX", "AIF_MIX1_PB", "AIF1 PB" },
 
 	{ "SLIM RX0 MUX", "AIF2_PB", "AIF2 PB" },
 	{ "SLIM RX1 MUX", "AIF2_PB", "AIF2 PB" },
@@ -3151,9 +3108,6 @@ wcd9335_codec_enable_prim_interpolator(struct snd_soc_component *comp, u16 reg,
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
 		wcd->prim_int_users[ind]++;
-		dev_info(comp->dev,
-			 "INTERP PRE_PMU: reg=0x%x ind=%d users=%d\n",
-			 prim_int_reg, ind, wcd->prim_int_users[ind]);
 		if (wcd->prim_int_users[ind] == 1) {
 			snd_soc_component_update_bits(
 				comp, prim_int_reg,
@@ -4969,10 +4923,10 @@ static const struct regmap_range_cfg wcd9335_ifc_ranges[] = {
 		.range_min = 0x0,
 		.range_max = WCD9335_MAX_REGISTER,
 		.selector_reg = WCD9335_SEL_REGISTER,
-		.selector_mask = 0xff,
+		.selector_mask = 0xfff,
 		.selector_shift = 0,
 		.window_start = 0x800,
-		.window_len = 0x100,
+		.window_len = 0x400,
 	},
 };
 
@@ -5021,12 +4975,10 @@ static int wcd9335_parse_dt(struct wcd9335_codec *wcd)
 	struct device *dev = wcd->dev;
 	int ret;
 
-	/*
-	 * Don't claim reset GPIO in probe.  The NGD controller will
-	 * pulse it after the ADSP SLIMbus manager is active so the
-	 * codec's REPORT_PRESENT reaches a listening bus manager.
-	 */
-	wcd->reset_gpio = NULL;
+	wcd->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
+	if (IS_ERR(wcd->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(wcd->reset_gpio),
+				     "Reset GPIO missing from DT\n");
 
 	wcd->mclk = devm_clk_get(dev, "mclk");
 	if (IS_ERR(wcd->mclk))
@@ -5039,15 +4991,17 @@ static int wcd9335_parse_dt(struct wcd9335_codec *wcd)
 				     "slimbus clock not found\n");
 
 	/*
-	 * Get regulators WITHOUT enabling them. Enable in slim_status
-	 * when the codec is actually needed. This avoids holding shared
-	 * regulators (pm8953_l5) that prevent TAS2557 from power-cycling.
+	 * Get regulator references but do NOT enable them.
+	 * pm8953_l5 is shared with TAS2557 which needs to power-cycle it
+	 * for idle-death recovery. Holding an enable reference here would
+	 * prevent that. L5 is always-on (multiple consumers), and the ADSP
+	 * manages WCD9335 power independently.
 	 */
-	wcd->num_supplies = ARRAY_SIZE(wcd9335_supplies);
-	for (ret = 0; ret < wcd->num_supplies; ret++)
+	for (ret = 0; ret < ARRAY_SIZE(wcd9335_supplies); ret++)
 		wcd->supplies[ret].supply = wcd9335_supplies[ret];
 
-	ret = devm_regulator_bulk_get(dev, wcd->num_supplies, wcd->supplies);
+	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(wcd9335_supplies),
+				      wcd->supplies);
 	if (ret)
 		return dev_err_probe(dev, ret,
 				     "Failed to get supplies\n");
@@ -5242,14 +5196,12 @@ static int wcd9335_slim_probe(struct slim_device *slim)
 		goto disable_mclk;
 	}
 
-	/*
-	 * Skip reset on probe: the codec may already be enumerated on
-	 * the SLIMbus from the bootloader.  Resetting it disconnects it
-	 * from the bus, and the ADSP may not see the re-enumeration in
-	 * time for ADDR_QUERY.  We'll do a proper reset in bring_up()
-	 * after the logical address is assigned.
-	 */
-	dev_info(dev, "Skipping reset in probe (codec may be pre-enumerated)\n");
+	ret = wcd9335_power_on_reset(wcd);
+	if (ret)
+		goto disable_native_clk;
+
+	/* Give codec time to start up with correct 9.6MHz MCLK */
+	msleep(50);
 
 	dev_set_drvdata(dev, wcd);
 
@@ -5310,12 +5262,6 @@ static int wcd9335_slim_status(struct slim_device *sdev,
 	if (IS_ERR(wcd->if_regmap))
 		return dev_err_probe(dev, PTR_ERR(wcd->if_regmap),
 				     "Failed to allocate ifc register map\n");
-
-	/*
-	 * Don't formally enable regulators here — the bootloader already
-	 * has pm8953_l5 on, and incrementing the use count prevents TAS2557
-	 * from power-cycling the shared regulator for idle-death recovery.
-	 */
 
 	ret = wcd9335_bring_up(wcd);
 	if (ret) {

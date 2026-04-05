@@ -505,7 +505,13 @@ DEFINE_CLK_SMD_RPM_XO_BUFFER_PINCTRL(cxo_a2, 6, 19200000);
 
 DEFINE_CLK_SMD_RPM_XO_BUFFER(diff_clk, 7, 19200000);
 DEFINE_CLK_SMD_RPM_XO_BUFFER(div_clk1, 11, 19200000);
-DEFINE_CLK_SMD_RPM_XO_BUFFER(div_clk2, 12, 19200000);
+/*
+ * div_clk2: WCD9335 MCLK. Defined as rate-settable (not XO buffer) so
+ * clk_set_rate(9600000) sends RPM key=RATE to configure the divider.
+ * WCD9335 requires 9.6MHz MCLK — 19.2MHz (XO direct) doesn't work.
+ */
+__DEFINE_CLK_SMD_RPM(div_clk2, div_clk2_a, QCOM_SMD_RPM_CLK_BUF_A, 12,
+		     QCOM_RPM_SMD_KEY_RATE, 19200000, 0);
 DEFINE_CLK_SMD_RPM_XO_BUFFER(div_clk3, 13, 19200000);
 
 static const struct clk_smd_rpm *bimc_pcnoc_icc_clks[] = {
