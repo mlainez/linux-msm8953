@@ -547,7 +547,7 @@ static const char *const rx_hph_mode_mux_text[] = {
 };
 
 static const char *const slim_rx_mux_text[] = {
-	"ZERO", "AIF1_PB", "AIF2_PB", "AIF3_PB", "AIF4_PB",
+	"ZERO", "AIF1_PB", "AIF2_PB", "AIF3_PB", "AIF4_PB", "AIF_MIX1_PB",
 };
 
 static const char *const adc_mux_text[] = { "DMIC", "AMIC", "ANC_FB_TUNE1",
@@ -1626,73 +1626,45 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 	if (!cfg->chs)
 		return -ENOMEM;
 
+	/*
+	 * Write PGD port registers using main regmap (not if_regmap)
+	 * to avoid paging races. Use ch->port directly (absolute port
+	 * number) and write accumulated payload (all channel bits).
+	 */
 	i = 0;
 	list_for_each_entry(ch, slim_ch_list, list) {
 		cfg->chs[i++] = ch->ch_num;
 		if (direction == SNDRV_PCM_STREAM_PLAYBACK) {
-			/*
-			 * PGD port register index: ch->port is the SLIMbus
-			 * logical port (16+), but registers use 0-based index.
-			 * Subtract WCD9335_RX_START to get the register index.
-			 */
-			u8 pn = ch->port - WCD9335_RX_START;
-			u16 this_ch_bit = 1 << ch->shift;
-
-			ret = regmap_write(
-				wcd->if_regmap,
-				WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(pn),
-				this_ch_bit);
-
+			ret = regmap_write(wcd->regmap,
+				WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(ch->port),
+				payload);
 			if (ret < 0)
 				goto err;
 
-			ret = regmap_write(
-				wcd->if_regmap,
-				WCD9335_SLIM_PGD_RX_PORT_CFG(pn),
+			ret = regmap_write(wcd->regmap,
+				WCD9335_SLIM_PGD_RX_PORT_CFG(ch->port),
 				WCD9335_SLIM_WATER_MARK_VAL);
 			if (ret < 0)
 				goto err;
-
-			dev_info(wcd->dev,
-				 "PGD RX port %d: MULTI_CHNL=0x%x (shift=%d) CFG=0x%x\n",
-				 pn, this_ch_bit, ch->shift, WCD9335_SLIM_WATER_MARK_VAL);
 		} else {
-			u8 pn = ch->port; /* TX ports are 0-based already */
-			u16 this_ch_bit = 1 << ch->shift;
-
-			ret = regmap_write(
-				wcd->if_regmap,
-				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_0(pn),
-				this_ch_bit & 0x00FF);
+			ret = regmap_write(wcd->regmap,
+				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_0(ch->port),
+				payload & 0x00FF);
 			if (ret < 0)
 				goto err;
 
-			ret = regmap_write(
-				wcd->if_regmap,
-				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_1(pn),
-				(this_ch_bit & 0xFF00) >> 8);
+			ret = regmap_write(wcd->regmap,
+				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_1(ch->port),
+				(payload & 0xFF00) >> 8);
 			if (ret < 0)
 				goto err;
 
-			ret = regmap_write(
-				wcd->if_regmap,
-				WCD9335_SLIM_PGD_TX_PORT_CFG(pn),
+			ret = regmap_write(wcd->regmap,
+				WCD9335_SLIM_PGD_TX_PORT_CFG(ch->port),
 				WCD9335_SLIM_WATER_MARK_VAL);
-
 			if (ret < 0)
 				goto err;
 		}
-	}
-
-	/* Verify PGD register writes reach hardware */
-	{
-		unsigned int readback = 0xDE;
-
-		regmap_read(wcd->if_regmap,
-			    WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_0(0), &readback);
-		dev_info(wcd->dev,
-			 "PGD TX_PORT_MULTI_CHNL_0(0) write=0x%x readback=0x%x\n",
-			 payload & 0xFF, readback);
 	}
 
 	dai_data->sruntime = slim_stream_allocate(wcd->slim, "WCD9335-SLIM");
@@ -4923,10 +4895,10 @@ static const struct regmap_range_cfg wcd9335_ifc_ranges[] = {
 		.range_min = 0x0,
 		.range_max = WCD9335_MAX_REGISTER,
 		.selector_reg = WCD9335_SEL_REGISTER,
-		.selector_mask = 0xfff,
+		.selector_mask = 0xff,
 		.selector_shift = 0,
 		.window_start = 0x800,
-		.window_len = 0x400,
+		.window_len = 0x100,
 	},
 };
 
