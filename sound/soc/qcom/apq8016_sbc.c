@@ -13,6 +13,7 @@
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/jack.h>
+#include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
 #include <sound/soc.h>
 #include <uapi/linux/input-event-codes.h>
 #include <dt-bindings/sound/apq8016-lpass.h>
@@ -20,7 +21,7 @@
 #include "common.h"
 #include "qdsp6/q6afe.h"
 
-#define MI2S_COUNT  (MI2S_QUINARY + 1)
+#define MI2S_COUNT (MI2S_QUINARY + 1)
 
 struct apq8016_sbc_data {
 	struct snd_soc_card card;
@@ -33,19 +34,19 @@ struct apq8016_sbc_data {
 	int mi2s_clk_count[MI2S_COUNT];
 };
 
-#define MIC_CTRL_TER_WS_SLAVE_SEL	BIT(21)
-#define MIC_CTRL_QUA_WS_SLAVE_SEL_10	BIT(17)
-#define MIC_CTRL_TLMM_SCLK_EN		BIT(1)
-#define	SPKR_CTL_PRI_WS_SLAVE_SEL_11	(BIT(17) | BIT(16))
-#define SPKR_CTL_TLMM_MCLK_EN		BIT(1)
-#define SPKR_CTL_TLMM_SCLK_EN		BIT(2)
-#define SPKR_CTL_TLMM_DATA1_EN		BIT(3)
-#define SPKR_CTL_TLMM_WS_OUT_SEL_MASK	GENMASK(7, 6)
-#define SPKR_CTL_TLMM_WS_OUT_SEL_SEC	BIT(6)
-#define SPKR_CTL_TLMM_WS_EN_SEL_MASK	GENMASK(19, 18)
-#define SPKR_CTL_TLMM_WS_EN_SEL_SEC	BIT(18)
-#define DEFAULT_MCLK_RATE		9600000
-#define MI2S_BCLK_RATE			1536000
+#define MIC_CTRL_TER_WS_SLAVE_SEL BIT(21)
+#define MIC_CTRL_QUA_WS_SLAVE_SEL_10 BIT(17)
+#define MIC_CTRL_TLMM_SCLK_EN BIT(1)
+#define SPKR_CTL_PRI_WS_SLAVE_SEL_11 (BIT(17) | BIT(16))
+#define SPKR_CTL_TLMM_MCLK_EN BIT(1)
+#define SPKR_CTL_TLMM_SCLK_EN BIT(2)
+#define SPKR_CTL_TLMM_DATA1_EN BIT(3)
+#define SPKR_CTL_TLMM_WS_OUT_SEL_MASK GENMASK(7, 6)
+#define SPKR_CTL_TLMM_WS_OUT_SEL_SEC BIT(6)
+#define SPKR_CTL_TLMM_WS_EN_SEL_MASK GENMASK(19, 18)
+#define SPKR_CTL_TLMM_WS_EN_SEL_SEC BIT(18)
+#define DEFAULT_MCLK_RATE 9600000
+#define MI2S_BCLK_RATE 1536000
 
 static struct snd_soc_jack_pin apq8016_sbc_jack_pins[] = {
 	{
@@ -70,23 +71,26 @@ static int apq8016_dai_init(struct snd_soc_pcm_runtime *rtd, int mi2s)
 	switch (mi2s) {
 	case MI2S_PRIMARY:
 		writel(readl(pdata->spkr_iomux) | SPKR_CTL_PRI_WS_SLAVE_SEL_11,
-			pdata->spkr_iomux);
+		       pdata->spkr_iomux);
 		break;
 
 	case MI2S_QUATERNARY:
 		/* Configure the Quat MI2S to TLMM */
 		writel(readl(pdata->mic_iomux) | MIC_CTRL_QUA_WS_SLAVE_SEL_10 |
-			MIC_CTRL_TLMM_SCLK_EN,
-			pdata->mic_iomux);
+			       MIC_CTRL_TLMM_SCLK_EN,
+		       pdata->mic_iomux);
 		break;
 	case MI2S_SECONDARY:
 		/* Clear TLMM_WS_OUT_SEL and TLMM_WS_EN_SEL fields */
 		value = readl(pdata->spkr_iomux) &
-			~(SPKR_CTL_TLMM_WS_OUT_SEL_MASK | SPKR_CTL_TLMM_WS_EN_SEL_MASK);
+			~(SPKR_CTL_TLMM_WS_OUT_SEL_MASK |
+			  SPKR_CTL_TLMM_WS_EN_SEL_MASK);
 		/* Configure the Sec MI2S to TLMM */
 		writel(value | SPKR_CTL_TLMM_MCLK_EN | SPKR_CTL_TLMM_SCLK_EN |
-			SPKR_CTL_TLMM_DATA1_EN | SPKR_CTL_TLMM_WS_OUT_SEL_SEC |
-			SPKR_CTL_TLMM_WS_EN_SEL_SEC, pdata->spkr_iomux);
+			       SPKR_CTL_TLMM_DATA1_EN |
+			       SPKR_CTL_TLMM_WS_OUT_SEL_SEC |
+			       SPKR_CTL_TLMM_WS_EN_SEL_SEC,
+		       pdata->spkr_iomux);
 		break;
 	case MI2S_QUINARY:
 		/* Configure Quinary MI2S */
@@ -96,29 +100,26 @@ static int apq8016_dai_init(struct snd_soc_pcm_runtime *rtd, int mi2s)
 		break;
 	case MI2S_TERTIARY:
 		writel(readl(pdata->mic_iomux) | MIC_CTRL_TER_WS_SLAVE_SEL |
-			MIC_CTRL_TLMM_SCLK_EN,
-			pdata->mic_iomux);
+			       MIC_CTRL_TLMM_SCLK_EN,
+		       pdata->mic_iomux);
 
 		break;
 
 	default:
 		dev_err(card->dev, "unsupported cpu dai configuration\n");
 		return -EINVAL;
-
 	}
 
 	if (!pdata->jack_setup) {
 		struct snd_jack *jack;
 
-		rval = snd_soc_card_jack_new_pins(card, "Headset Jack",
-						  SND_JACK_HEADSET |
-						  SND_JACK_HEADPHONE |
-						  SND_JACK_BTN_0 | SND_JACK_BTN_1 |
-						  SND_JACK_BTN_2 | SND_JACK_BTN_3 |
-						  SND_JACK_BTN_4,
-						  &pdata->jack,
-						  apq8016_sbc_jack_pins,
-						  ARRAY_SIZE(apq8016_sbc_jack_pins));
+		rval = snd_soc_card_jack_new_pins(
+			card, "Headset Jack",
+			SND_JACK_HEADSET | SND_JACK_HEADPHONE | SND_JACK_BTN_0 |
+				SND_JACK_BTN_1 | SND_JACK_BTN_2 |
+				SND_JACK_BTN_3 | SND_JACK_BTN_4,
+			&pdata->jack, apq8016_sbc_jack_pins,
+			ARRAY_SIZE(apq8016_sbc_jack_pins));
 
 		if (rval < 0) {
 			dev_err(card->dev, "Unable to add Headphone Jack\n");
@@ -135,16 +136,16 @@ static int apq8016_dai_init(struct snd_soc_pcm_runtime *rtd, int mi2s)
 	}
 
 	for_each_rtd_codec_dais(rtd, i, codec_dai) {
-
 		component = codec_dai->component;
 		/* Set default mclk for internal codec */
-		rval = snd_soc_component_set_sysclk(component, 0, 0, DEFAULT_MCLK_RATE,
-				       SND_SOC_CLOCK_IN);
+		rval = snd_soc_component_set_sysclk(
+			component, 0, 0, DEFAULT_MCLK_RATE, SND_SOC_CLOCK_IN);
 		if (rval != 0 && rval != -ENOTSUPP) {
 			dev_warn(card->dev, "Failed to set mclk: %d\n", rval);
 			return rval;
 		}
-		rval = snd_soc_component_set_jack(component, &pdata->jack, NULL);
+		rval = snd_soc_component_set_jack(component, &pdata->jack,
+						  NULL);
 		if (rval != 0 && rval != -ENOTSUPP) {
 			dev_warn(card->dev, "Failed to set jack: %d\n", rval);
 			return rval;
@@ -218,9 +219,14 @@ static int qdsp6_get_bit_clk_id(struct apq8016_sbc_data *data, int mi2s_id)
 static int msm8916_qdsp6_dai_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	int mi2s = qdsp6_dai_get_lpass_id(cpu_dai);
+
+	/* Non-MI2S DAIs (e.g. SLIMbus) need no IOMUX or clock setup */
+	if (mi2s < 0)
+		return 0;
 
 	snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
-	return apq8016_dai_init(rtd, qdsp6_dai_get_lpass_id(cpu_dai));
+	return apq8016_dai_init(rtd, mi2s);
 }
 
 static int msm8916_qdsp6_startup(struct snd_pcm_substream *substream)
@@ -234,11 +240,10 @@ static int msm8916_qdsp6_startup(struct snd_pcm_substream *substream)
 
 	mi2s = qdsp6_dai_get_lpass_id(cpu_dai);
 	if (mi2s < 0)
-		return mi2s;
+		return 0;
 
 	if (++data->mi2s_clk_count[mi2s] > 1)
 		return 0;
-
 
 	/* HACK For making external codecs work
 	 *
@@ -246,10 +251,12 @@ static int msm8916_qdsp6_startup(struct snd_pcm_substream *substream)
 	 * format to I2S.
 	 */
 	if (cpu_dai->id == QUINARY_MI2S_RX) {
-		snd_soc_dai_set_fmt(codec_dai, SND_SOC_DAIFMT_BC_FC | SND_SOC_DAIFMT_I2S);
+		snd_soc_dai_set_fmt(codec_dai,
+				    SND_SOC_DAIFMT_BC_FC | SND_SOC_DAIFMT_I2S);
 	}
 
-	ret = snd_soc_dai_set_sysclk(cpu_dai, qdsp6_get_bit_clk_id(data, mi2s), MI2S_BCLK_RATE, 0);
+	ret = snd_soc_dai_set_sysclk(cpu_dai, qdsp6_get_bit_clk_id(data, mi2s),
+				     MI2S_BCLK_RATE, 0);
 	if (ret)
 		dev_err(card->dev, "Failed to enable LPAIF bit clk: %d\n", ret);
 	return ret;
@@ -270,28 +277,101 @@ static void msm8916_qdsp6_shutdown(struct snd_pcm_substream *substream)
 	if (--data->mi2s_clk_count[mi2s] > 0)
 		return;
 
-	ret = snd_soc_dai_set_sysclk(cpu_dai, qdsp6_get_bit_clk_id(data, mi2s), 0, 0);
+	ret = snd_soc_dai_set_sysclk(cpu_dai, qdsp6_get_bit_clk_id(data, mi2s),
+				     0, 0);
 	if (ret)
-		dev_err(card->dev, "Failed to disable LPAIF bit clk: %d\n", ret);
+		dev_err(card->dev, "Failed to disable LPAIF bit clk: %d\n",
+			ret);
+}
+
+static int msm8916_qdsp6_hw_params(struct snd_pcm_substream *substream,
+				   struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	int ret = 0;
+
+	/*
+	 * Set SLIMbus shared channel mapping for Q6AFE.
+	 * WCD9335 uses shared channels 128+ for TX, 144+ for RX.
+	 * Without this, Q6AFE sends ch_mapping={0,0,0,0} which the
+	 * ADSP rejects with ADSP_EUNSUPPORTED.
+	 */
+	if (cpu_dai->id == SLIMBUS_0_TX) {
+		/*
+		 * Get TX channel map from the codec — it reflects which
+		 * SLIM TX ports the user enabled via the mixer (e.g.
+		 * "AIF1_CAP Mixer SLIM TX7" → ch 135).
+		 */
+		struct snd_soc_dai *codec_dai;
+		unsigned int tx_ch[8] = {};
+		unsigned int tx_num = 0;
+
+		codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+		ret = snd_soc_dai_get_channel_map(codec_dai,
+						  &tx_num, tx_ch, NULL, NULL);
+		if (ret || tx_num == 0) {
+			/* Fallback: TX0 (ch 128) */
+			tx_ch[0] = 128;
+			tx_num = 1;
+		}
+
+		dev_info(rtd->card->dev,
+			 "SLIM TX ch_map: id=%d channels=%d tx_num=%d tx_ch[0]=%d\n",
+			 cpu_dai->id, params_channels(params), tx_num, tx_ch[0]);
+
+		ret = snd_soc_dai_set_channel_map(cpu_dai,
+						  tx_num, tx_ch, 0, NULL);
+	} else if (cpu_dai->id == SLIMBUS_0_RX) {
+		/* Get RX channels dynamically from codec */
+		struct snd_soc_dai *codec_dai;
+		unsigned int rx_ch[8] = {};
+		unsigned int rx_num = 0;
+
+		codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+		ret = snd_soc_dai_get_channel_map(codec_dai,
+						  NULL, NULL, &rx_num, rx_ch);
+		if (ret || rx_num == 0) {
+			rx_ch[0] = 144;
+			rx_ch[1] = 145;
+			rx_num = 2;
+		}
+
+		dev_info(rtd->card->dev,
+			 "SLIM RX ch_map: rx_num=%d rx_ch=[%d,%d]\n",
+			 rx_num, rx_ch[0], rx_ch[1]);
+
+		ret = snd_soc_dai_set_channel_map(cpu_dai, 0, NULL,
+						  params_channels(params),
+						  rx_ch);
+	}
+	return ret;
 }
 
 static const struct snd_soc_ops msm8916_qdsp6_be_ops = {
 	.startup = msm8916_qdsp6_startup,
+	.hw_params = msm8916_qdsp6_hw_params,
 	.shutdown = msm8916_qdsp6_shutdown,
 };
 
 static int msm8916_qdsp6_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 					    struct snd_pcm_hw_params *params)
 {
-	struct snd_interval *rate = hw_param_interval(params,
-					SNDRV_PCM_HW_PARAM_RATE);
-	struct snd_interval *channels = hw_param_interval(params,
-					SNDRV_PCM_HW_PARAM_CHANNELS);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	struct snd_interval *rate =
+		hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE);
+	struct snd_interval *channels =
+		hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
 	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
 
 	rate->min = rate->max = 48000;
-	channels->min = channels->max = 2;
 	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S16_LE);
+
+	/* SLIMbus and MI2S capture can be mono */
+	if (cpu_dai->id == SLIMBUS_0_TX || cpu_dai->id == TERTIARY_MI2S_TX)
+		channels->min = 1;
+	else
+		channels->min = channels->max = 2;
 
 	return 0;
 }
@@ -308,7 +388,8 @@ static void msm8916_qdsp6_add_ops(struct snd_soc_card *card)
 		if (link->no_pcm) {
 			link->init = msm8916_qdsp6_dai_init;
 			link->ops = &msm8916_qdsp6_be_ops;
-			link->be_hw_params_fixup = msm8916_qdsp6_be_hw_params_fixup;
+			link->be_hw_params_fixup =
+				msm8916_qdsp6_be_hw_params_fixup;
 		}
 	}
 }
@@ -364,15 +445,18 @@ static int apq8016_sbc_platform_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	data->mic_iomux = devm_platform_ioremap_resource_byname(pdev, "mic-iomux");
+	data->mic_iomux =
+		devm_platform_ioremap_resource_byname(pdev, "mic-iomux");
 	if (IS_ERR(data->mic_iomux))
 		return PTR_ERR(data->mic_iomux);
 
-	data->spkr_iomux = devm_platform_ioremap_resource_byname(pdev, "spkr-iomux");
+	data->spkr_iomux =
+		devm_platform_ioremap_resource_byname(pdev, "spkr-iomux");
 	if (IS_ERR(data->spkr_iomux))
 		return PTR_ERR(data->spkr_iomux);
 
-	data->quin_iomux = devm_platform_ioremap_resource_byname(pdev, "quin-iomux");
+	data->quin_iomux =
+		devm_platform_ioremap_resource_byname(pdev, "quin-iomux");
 	if (IS_ERR(data->quin_iomux))
 		return PTR_ERR(data->quin_iomux);
 
@@ -383,9 +467,12 @@ static int apq8016_sbc_platform_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id apq8016_sbc_device_id[] __maybe_unused = {
-	{ .compatible = "qcom,apq8016-sbc-sndcard", .data = apq8016_sbc_add_ops },
-	{ .compatible = "qcom,msm8916-qdsp6-sndcard", .data = msm8916_qdsp6_add_ops },
-	{ .compatible = "qcom,msm8953-qdsp6-sndcard", .data = msm8953_qdsp6_add_ops },
+	{ .compatible = "qcom,apq8016-sbc-sndcard",
+	  .data = apq8016_sbc_add_ops },
+	{ .compatible = "qcom,msm8916-qdsp6-sndcard",
+	  .data = msm8916_qdsp6_add_ops },
+	{ .compatible = "qcom,msm8953-qdsp6-sndcard",
+	  .data = msm8953_qdsp6_add_ops },
 	{},
 };
 MODULE_DEVICE_TABLE(of, apq8016_sbc_device_id);

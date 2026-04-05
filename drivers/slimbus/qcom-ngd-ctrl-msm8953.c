@@ -2413,11 +2413,10 @@ static int msm8953_slim_probe(struct platform_device *pdev)
 	}
 
 	/*
-	 * If ADSP is already up when we probe, kick off the bring-up.
-	 * PDR may also trigger this if it fires after we register.
+	 * Kick off bring-up — if ADSP isn't ready yet, the QMI/PDR
+	 * callbacks will re-trigger this when it comes up.
 	 */
-	if (qcom_ssr_last_status("lpass") == QCOM_SSR_AFTER_POWERUP)
-		schedule_work(&dev->ngd_up_work);
+	schedule_work(&dev->ngd_up_work);
 
 	dev_info(&pdev->dev, "MSM8953 SLIMbus NGD controller registered\n");
 	return 0;
