@@ -34,10 +34,14 @@
 #define AFE_MODULE_AUDIO_DEV_INTERFACE	0x0001020C
 #define AFE_MODULE_TDM			0x0001028A
 
+#define AFE_MODULE_CDC_DEV_CFG		0x00010234
 #define AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG 0x00010235
+#define AFE_PARAM_ID_CDC_REG_CFG	0x00010236
+#define AFE_PARAM_ID_CDC_REG_CFG_INIT	0x00010237
 #define AFE_PARAM_ID_USB_AUDIO_DEV_PARAMS    0x000102A5
 #define AFE_PARAM_ID_USB_AUDIO_DEV_LPCM_FMT 0x000102AA
 
+#define AFE_PARAM_ID_SET_TOPOLOGY	0x0001025A
 #define AFE_PARAM_ID_LPAIF_CLK_CONFIG	0x00010238
 #define AFE_PARAM_ID_INT_DIGITAL_CDC_CLK_CONFIG	0x00010239
 
@@ -371,6 +375,14 @@
 #define AFE_CMD_RESP_NONE	1
 #define AFE_CLK_TOKEN		1024
 
+struct afe_param_cdc_slimbus_slave_cfg {
+	u32 minor_version;
+	u32 device_enum_addr_lsw;
+	u32 device_enum_addr_msw;
+	u16 tx_slave_port_offset;
+	u16 rx_slave_port_offset;
+} __packed;
+
 struct q6afe {
 	struct apr_device *apr;
 	struct device *dev;
@@ -380,6 +392,7 @@ struct q6afe {
 	wait_queue_head_t wait;
 	struct list_head port_list;
 	spinlock_t port_list_lock;
+	bool slim_slave_cfg_sent;
 };
 
 struct afe_port_cmd_device_start {
@@ -1085,7 +1098,8 @@ static int q6afe_set_param(struct q6afe *afe, struct q6afe_port *port,
 	param = p + APR_HDR_SIZE;
 	pdata = p + APR_HDR_SIZE + sizeof(*param);
 	pl = p + APR_HDR_SIZE + sizeof(*param) + sizeof(*pdata);
-	memcpy(pl, data, psize);
+	if (data && psize)
+		memcpy(pl, data, psize);
 
 	pkt->hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
 					   APR_HDR_LEN(APR_HDR_SIZE),
@@ -1652,6 +1666,114 @@ void q6afe_cdc_dma_port_prepare(struct q6afe_port *port,
 		dma_cfg->active_channels_mask = (1 << cfg->num_channels) - 1;
 }
 EXPORT_SYMBOL_GPL(q6afe_cdc_dma_port_prepare);
+
+static int q6afe_send_cdc_slimbus_slave_cfg(struct q6afe *afe)
+{
+	struct afe_param_cdc_slimbus_slave_cfg cfg = {};
+	int ret;
+
+	/*
+	 * WCD9335 (Tasha) SLIMbus enumeration address:
+	 * struct slim_eaddr is packed as {instance, dev_index, prod_code, manf_id}
+	 * For WCD9335 codec device: instance=0, dev_index=1, prod_code=0x01a0, manf_id=0x0217
+	 * As bytes on LE: [0x00, 0x01, 0xa0, 0x01, 0x17, 0x02]
+	 */
+	cfg.minor_version = 1;
+	cfg.device_enum_addr_lsw = 0x01a00100;  /* bytes 0-3: inst=0x00, idx=0x01, prod=0x01a0 */
+	cfg.device_enum_addr_msw = 0x0217;       /* bytes 4-5: manf=0x0217 */
+	cfg.tx_slave_port_offset = 0;
+	cfg.rx_slave_port_offset = 16;
+
+	dev_info(afe->dev,
+		 "Sending CDC SLIMbus slave cfg: eaddr=0x%x:0x%x tx_off=%d rx_off=%d\n",
+		 cfg.device_enum_addr_msw, cfg.device_enum_addr_lsw,
+		 cfg.tx_slave_port_offset, cfg.rx_slave_port_offset);
+
+	ret = q6afe_set_param(afe, NULL, &cfg,
+			      AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG,
+			      AFE_MODULE_CDC_DEV_CFG,
+			      sizeof(cfg), AFE_CLK_TOKEN);
+	if (ret) {
+		dev_err(afe->dev, "CDC slave cfg failed: %d\n", ret);
+		return ret;
+	}
+
+	/*
+	 * Send CDC_REG_CFG entries for SLIMbus PGD port configuration.
+	 * These tell the ADSP the WCD9335 register addresses for enabling
+	 * and configuring the SLIMbus data ports. Without these, the ADSP
+	 * doesn't know how to set up the SLIMbus data channel.
+	 *
+	 * Struct: { minor_ver(u32), reg_addr(u32), field_type(u32),
+	 *           bit_mask(u32), bit_width(u16), offset_scale(u16) }
+	 * TASHA_REGISTER_START_OFFSET = 0x800
+	 * TASHA_SB_PGD_PORT_TX_BASE = 0x50
+	 * TASHA_SB_PGD_PORT_RX_BASE = 0x40
+	 */
+	{
+		struct afe_param_cdc_reg_cfg_t {
+			u32 minor_version;
+			u32 reg_logical_addr;
+			u32 reg_field_type;
+			u32 reg_field_bit_mask;
+			u16 reg_bit_width;
+			u16 reg_offset_scale;
+		} __packed;
+
+		/* Field type enums matching downstream wcd9xxx-common-v2.h */
+		enum {
+			SB_PGD_PORT_TX_WATERMARK_N = 196,
+			SB_PGD_PORT_TX_ENABLE_N = 197,
+			SB_PGD_PORT_RX_WATERMARK_N = 198,
+			SB_PGD_PORT_RX_ENABLE_N = 199,
+		};
+
+		static const struct afe_param_cdc_reg_cfg_t cdc_regs[] = {
+			{ 1, 0x800 + 0x50, SB_PGD_PORT_TX_WATERMARK_N, 0x1E, 8, 1 },
+			{ 1, 0x800 + 0x50, SB_PGD_PORT_TX_ENABLE_N, 0x01, 8, 1 },
+			{ 1, 0x800 + 0x40, SB_PGD_PORT_RX_WATERMARK_N, 0x1E, 8, 1 },
+			{ 1, 0x800 + 0x40, SB_PGD_PORT_RX_ENABLE_N, 0x01, 8, 1 },
+		};
+
+		/* Send all CDC_REG_CFG entries in a single packet.
+		 * Format: pdata header + payload where payload =
+		 * num_registers(u32) + reg_cfg[0..N-1]
+		 */
+		{
+			int nregs = ARRAY_SIZE(cdc_regs);
+			int payload_sz = sizeof(u32) + nregs * sizeof(cdc_regs[0]);
+			u8 *payload = kzalloc(payload_sz, GFP_KERNEL);
+
+			if (payload) {
+				*((u32 *)payload) = cpu_to_le32(nregs);
+				memcpy(payload + sizeof(u32), cdc_regs,
+				       nregs * sizeof(cdc_regs[0]));
+
+				ret = q6afe_set_param(afe, NULL, payload,
+						      AFE_PARAM_ID_CDC_REG_CFG,
+						      AFE_MODULE_CDC_DEV_CFG,
+						      payload_sz, AFE_CLK_TOKEN);
+				if (ret)
+					dev_warn(afe->dev,
+						 "CDC_REG_CFG batch failed: %d\n",
+						 ret);
+				else
+					dev_info(afe->dev,
+						 "CDC_REG_CFG: sent %d entries OK\n",
+						 nregs);
+				kfree(payload);
+			}
+		}
+	}
+
+	/* Send CDC_REG_CFG_INIT to apply the register config */
+	dev_info(afe->dev, "Sending CDC_REG_CFG_INIT\n");
+	return q6afe_set_param(afe, NULL, NULL,
+			       AFE_PARAM_ID_CDC_REG_CFG_INIT,
+			       AFE_MODULE_CDC_DEV_CFG,
+			       0, AFE_CLK_TOKEN);
+}
+
 /**
  * q6afe_port_start() - Start a afe port
  *
@@ -1669,6 +1791,43 @@ int q6afe_port_start(struct q6afe_port *port)
 	int pkt_size;
 	void *p __free(kfree) = NULL;
 
+	/*
+	 * CDC SLIMbus slave config: skip on MSM8953/SDM632.
+	 * The AFE_MODULE_CDC_DEV_CFG (0x00010234) module is not supported
+	 * by the MSM8953 ADSP firmware — it returns ADSP_EBADPARAM.
+	 * The downstream kernel does not send this command at all.
+	 * Skipping avoids a 3s ACDB calibration timeout.
+	 */
+
+	/* Debug: dump SLIMbus AFE config before sending */
+	if (port_id == 0x4001 || port_id == 0x4000) {
+		struct afe_param_id_slimbus_cfg *sc = &port->port_cfg.slim_cfg;
+
+		dev_info(afe->dev,
+			 "AFE SLIM port 0x%x: ver=%d dev=%d bw=%d rate=%d fmt=%d nch=%d ch=[%d,%d,%d,%d]\n",
+			 port_id, sc->sb_cfg_minor_version,
+			 sc->slimbus_dev_id, sc->bit_width,
+			 sc->sample_rate, sc->data_format,
+			 sc->num_channels,
+			 sc->shared_ch_mapping[0], sc->shared_ch_mapping[1],
+			 sc->shared_ch_mapping[2], sc->shared_ch_mapping[3]);
+	}
+
+	/* Send topology ID for SLIMbus ports (required by ADSP to set up
+	 * the audio processing chain before DEVICE_START) */
+	if (port_id == 0x4001 || port_id == 0x4000) {
+		u32 topology = 0; /* passthrough — no ACDB calibration */
+
+		ret = q6afe_port_set_param_v2(port, &topology,
+					      AFE_PARAM_ID_SET_TOPOLOGY,
+					      AFE_MODULE_AUDIO_DEV_INTERFACE,
+					      sizeof(topology));
+		if (ret)
+			dev_warn(afe->dev,
+				 "AFE SET_TOPOLOGY for port 0x%x failed %d\n",
+				 port_id, ret);
+	}
+
 	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
 				       AFE_MODULE_AUDIO_DEV_INTERFACE,
 				       sizeof(port->port_cfg));
@@ -1676,6 +1835,19 @@ int q6afe_port_start(struct q6afe_port *port)
 		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\n",
 			port_id, ret);
 		return ret;
+	}
+
+	/* Send AFE_PARAM_ID_ENABLE to activate the port's audio path */
+	{
+		u32 enable = 1;
+
+		ret = q6afe_port_set_param_v2(port, &enable, 0x00010203,
+					      AFE_MODULE_AUDIO_DEV_INTERFACE,
+					      sizeof(enable));
+		if (ret)
+			dev_info(afe->dev,
+				 "AFE ENABLE param for port 0x%x: %d (non-fatal)\n",
+				 port_id, ret);
 	}
 
 	if (port->scfg) {
@@ -1712,6 +1884,9 @@ int q6afe_port_start(struct q6afe_port *port)
 	if (ret)
 		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\n",
 			port_id, ret);
+	else
+		dev_info(afe->dev, "AFE DEVICE_START port 0x%x: SUCCESS\n",
+			 port_id);
 
 	return ret;
 }
