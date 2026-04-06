@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/mutex.h>
 #include <linux/dma-mapping.h>
+#include <linux/platform_device.h>
 #include <linux/list.h>
 #include <linux/file.h>
 #include <linux/anon_inodes.h>
@@ -66,10 +67,12 @@ struct ion_alloc_entry {
 	void *vaddr;
 	dma_addr_t paddr;
 	size_t size;
+	bool use_cma;
 	struct list_head list;
 };
 static DEFINE_MUTEX(ion_lock);
 static LIST_HEAD(ion_allocs);
+static struct device *ion_cma_dev; /* ADSP-accessible CMA device */
 
 static int msm_audio_cal_open(struct inode *inode, struct file *f)
 {
@@ -434,18 +437,27 @@ static long ion_shim_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		entry->size = PAGE_ALIGN(alloc.len);
 		/*
-		 * Allocate DMA-coherent memory accessible to ADSP.
-		 * Use the misc device's parent or set DMA mask explicitly.
-		 * The ADSP needs to read this memory via SMMU, so regular
-		 * kernel pages won't work — need proper DMA allocation.
+		 * Allocate from the ADSP-accessible CMA region.
+		 * The fastrpc device has the adsp_mem CMA pool attached.
+		 * Find it and use its DMA allocator so the ADSP can read
+		 * the cal data via SMMU.
 		 */
-		if (ion_dev) {
-			dma_set_mask_and_coherent(ion_dev, DMA_BIT_MASK(36));
-			entry->vaddr = dma_alloc_coherent(ion_dev, entry->size,
-							  &entry->paddr, GFP_KERNEL);
+		{
+			struct device *cma_dev = NULL;
+
+			/* Find the fastrpc device which has adsp_mem CMA */
+			if (ion_cma_dev)
+				cma_dev = ion_cma_dev;
+
+			if (cma_dev) {
+				entry->vaddr = dma_alloc_coherent(cma_dev,
+					entry->size, &entry->paddr,
+					GFP_KERNEL);
+				entry->use_cma = true;
+			}
 		}
 		if (!entry->vaddr) {
-			/* Fallback to page allocator */
+			/* Fallback to page allocator (not ADSP accessible) */
 			entry->vaddr = (void *)__get_free_pages(
 				GFP_KERNEL | __GFP_ZERO,
 				get_order(entry->size));
@@ -454,6 +466,7 @@ static long ion_shim_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 				return -ENOMEM;
 			}
 			entry->paddr = virt_to_phys(entry->vaddr);
+			entry->use_cma = false;
 		}
 
 		mutex_lock(&ion_lock);
@@ -640,6 +653,32 @@ static int __init msm_audio_cal_init(void)
 		pr_warn("msm_audio_cal: failed to register /dev/ion shim: %d\n", ret);
 	else
 		pr_info("msm_audio_cal: /dev/ion shim registered\n");
+
+	/*
+	 * Find the FastRPC device which has ADSP CMA memory attached.
+	 * ION allocations will use this device's DMA allocator so the
+	 * ADSP can access the cal buffers.
+	 */
+	{
+		struct device *dev;
+
+		dev = bus_find_device_by_name(&platform_bus_type, NULL,
+			"c200000.remoteproc:smd-edge:fastrpc:cb@1");
+		if (dev) {
+			ion_cma_dev = dev;
+			pr_info("msm_audio_cal: using fastrpc cb@1 for CMA alloc\n");
+		} else {
+			/* Try the fastrpc parent */
+			dev = bus_find_device_by_name(&platform_bus_type, NULL,
+				"c200000.remoteproc:smd-edge:fastrpc");
+			if (dev) {
+				ion_cma_dev = dev;
+				pr_info("msm_audio_cal: using fastrpc device for CMA alloc\n");
+			} else {
+				pr_warn("msm_audio_cal: no CMA device found, ION allocs may not be ADSP-accessible\n");
+			}
+		}
+	}
 
 	return 0;
 }
