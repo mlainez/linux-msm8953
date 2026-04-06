@@ -18,6 +18,7 @@
 #include <linux/mutex.h>
 #include <linux/dma-mapping.h>
 #include <linux/platform_device.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/list.h>
 #include <linux/file.h>
 #include <linux/anon_inodes.h>
@@ -72,7 +73,7 @@ struct ion_alloc_entry {
 };
 static DEFINE_MUTEX(ion_lock);
 static LIST_HEAD(ion_allocs);
-static struct device *ion_cma_dev; /* ADSP-accessible CMA device */
+static struct device *ion_cma_dev; /* device with ADSP CMA attached */
 
 static int msm_audio_cal_open(struct inode *inode, struct file *f)
 {
@@ -655,28 +656,53 @@ static int __init msm_audio_cal_init(void)
 		pr_info("msm_audio_cal: /dev/ion shim registered\n");
 
 	/*
-	 * Find the FastRPC device which has ADSP CMA memory attached.
-	 * ION allocations will use this device's DMA allocator so the
-	 * ADSP can access the cal buffers.
+	 * Attach the ADSP CMA region to our misc device so that
+	 * dma_alloc_coherent gives ADSP-accessible memory.
+	 * Find the "adsp-region" node in reserved-memory and init CMA.
+	 */
+	/*
+	 * Find the ADSP shared memory region (adsp_mem) and attach it
+	 * to our misc device for DMA allocations. MSM8953 uses MPU
+	 * (not SMMU) so the ADSP can access CMA memory directly.
 	 */
 	{
-		struct device *dev;
+		struct device *dev = msm_audio_cal_misc.this_device;
+		struct device_node *np;
 
-		dev = bus_find_device_by_name(&platform_bus_type, NULL,
-			"c200000.remoteproc:smd-edge:fastrpc:cb@1");
-		if (dev) {
-			ion_cma_dev = dev;
-			pr_info("msm_audio_cal: using fastrpc cb@1 for CMA alloc\n");
-		} else {
-			/* Try the fastrpc parent */
-			dev = bus_find_device_by_name(&platform_bus_type, NULL,
-				"c200000.remoteproc:smd-edge:fastrpc");
-			if (dev) {
-				ion_cma_dev = dev;
-				pr_info("msm_audio_cal: using fastrpc device for CMA alloc\n");
-			} else {
-				pr_warn("msm_audio_cal: no CMA device found, ION allocs may not be ADSP-accessible\n");
+		/* Find a DT node with memory-region pointing to adsp CMA.
+		 * The fastrpc node has memory-region = <&adsp_mem>.
+		 */
+		np = of_find_compatible_node(NULL, NULL, "qcom,fastrpc");
+		if (np) {
+			struct device_node *rmem_np;
+
+			rmem_np = of_parse_phandle(np, "memory-region", 0);
+			if (rmem_np) {
+				struct reserved_mem *rmem;
+
+				rmem = of_reserved_mem_lookup(rmem_np);
+				if (rmem && rmem->size > 0) {
+					pr_info("msm_audio_cal: found ADSP CMA: %s base=0x%llx size=0x%llx\n",
+						rmem->name, (u64)rmem->base, (u64)rmem->size);
+
+					/* Attach CMA to our device properly */
+					dma_set_mask_and_coherent(dev, DMA_BIT_MASK(36));
+					if (rmem->ops && rmem->ops->device_init) {
+						if (!rmem->ops->device_init(rmem, dev)) {
+							ion_cma_dev = dev;
+							pr_info("msm_audio_cal: ADSP CMA attached to device\n");
+						} else {
+							pr_warn("msm_audio_cal: CMA device_init failed\n");
+						}
+					} else {
+						pr_warn("msm_audio_cal: CMA region has no ops\n");
+					}
+				}
+				of_node_put(rmem_np);
 			}
+			of_node_put(np);
+		} else {
+			pr_warn("msm_audio_cal: no fastrpc node found\n");
 		}
 	}
 
