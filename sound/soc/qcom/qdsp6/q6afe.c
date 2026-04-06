@@ -5,8 +5,6 @@
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
-#include <linux/firmware.h>
-#include <linux/dma-mapping.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
 #include <linux/jiffies.h>
@@ -36,14 +34,10 @@
 #define AFE_MODULE_AUDIO_DEV_INTERFACE	0x0001020C
 #define AFE_MODULE_TDM			0x0001028A
 
-#define AFE_MODULE_CDC_DEV_CFG		0x00010234
 #define AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG 0x00010235
-#define AFE_PARAM_ID_CDC_REG_CFG	0x00010236
-#define AFE_PARAM_ID_CDC_REG_CFG_INIT	0x00010237
 #define AFE_PARAM_ID_USB_AUDIO_DEV_PARAMS    0x000102A5
 #define AFE_PARAM_ID_USB_AUDIO_DEV_LPCM_FMT 0x000102AA
 
-#define AFE_PARAM_ID_SET_TOPOLOGY	0x0001025A
 #define AFE_PARAM_ID_LPAIF_CLK_CONFIG	0x00010238
 #define AFE_PARAM_ID_INT_DIGITAL_CDC_CLK_CONFIG	0x00010239
 
@@ -377,14 +371,6 @@
 #define AFE_CMD_RESP_NONE	1
 #define AFE_CLK_TOKEN		1024
 
-struct afe_param_cdc_slimbus_slave_cfg {
-	u32 minor_version;
-	u32 device_enum_addr_lsw;
-	u32 device_enum_addr_msw;
-	u16 tx_slave_port_offset;
-	u16 rx_slave_port_offset;
-} __packed;
-
 struct q6afe {
 	struct apr_device *apr;
 	struct device *dev;
@@ -394,8 +380,6 @@ struct q6afe {
 	wait_queue_head_t wait;
 	struct list_head port_list;
 	spinlock_t port_list_lock;
-	bool slim_slave_cfg_sent;
-	u32 mmap_handle;
 };
 
 struct afe_port_cmd_device_start {
@@ -996,7 +980,6 @@ static int q6afe_callback(struct apr_device *adev, struct apr_resp_pkt *data)
 		case AFE_PORT_CMD_DEVICE_STOP:
 		case AFE_PORT_CMD_DEVICE_START:
 		case AFE_SVC_CMD_SET_PARAM:
-		case 0x000100EA: /* AFE_SERVICE_CMD_SHARED_MEM_MAP_REGIONS */
 			port = q6afe_find_port(afe, hdr->token);
 			if (port) {
 				port->result = *res;
@@ -1008,8 +991,7 @@ static int q6afe_callback(struct apr_device *adev, struct apr_resp_pkt *data)
 			}
 			break;
 		default:
-			dev_info(afe->dev, "APR RSP unknown cmd=0x%x status=0x%x token=%d\n",
-				 res->opcode, res->status, hdr->token);
+			dev_err(afe->dev, "Unknown cmd 0x%x\n",	res->opcode);
 			break;
 		}
 	}
@@ -1019,18 +1001,7 @@ static int q6afe_callback(struct apr_device *adev, struct apr_resp_pkt *data)
 		afe->result.status = res->status;
 		wake_up(&afe->wait);
 		break;
-	case 0x000100EB: /* AFE_SERVICE_CMDRSP_SHARED_MEM_MAP_REGIONS */
-		afe->mmap_handle = *((u32 *)data->payload);
-		/* Set opcode to the COMMAND we sent, not the response opcode,
-		 * so the waiter's condition (result->opcode == rsp_opcode) matches */
-		afe->result.opcode = 0x000100EA;
-		afe->result.status = 0;
-		dev_info(afe->dev, "AFE mmap_handle = 0x%x\n", afe->mmap_handle);
-		wake_up(&afe->wait);
-		break;
 	default:
-		dev_info(afe->dev, "APR unhandled opcode=0x%x token=%d\n",
-			 hdr->opcode, hdr->token);
 		break;
 	}
 
@@ -1114,8 +1085,7 @@ static int q6afe_set_param(struct q6afe *afe, struct q6afe_port *port,
 	param = p + APR_HDR_SIZE;
 	pdata = p + APR_HDR_SIZE + sizeof(*param);
 	pl = p + APR_HDR_SIZE + sizeof(*param) + sizeof(*pdata);
-	if (data && psize)
-		memcpy(pl, data, psize);
+	memcpy(pl, data, psize);
 
 	pkt->hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
 					   APR_HDR_LEN(APR_HDR_SIZE),
@@ -1682,393 +1652,6 @@ void q6afe_cdc_dma_port_prepare(struct q6afe_port *port,
 		dma_cfg->active_channels_mask = (1 << cfg->num_channels) - 1;
 }
 EXPORT_SYMBOL_GPL(q6afe_cdc_dma_port_prepare);
-
-/*
- * Minimal ACDB AFE calibration loader.
- * Parses ACDB file sections (AFECLUT0, AFECCDFT, AFECCDOT, DATAPOOL)
- * and sends the calibration blob inline via AFE_PORT_CMD_SET_PARAM_V2.
- */
-static const u8 *acdb_find_tag(const u8 *data, size_t len, const char *tag)
-{
-	size_t tlen = strlen(tag);
-	const u8 *p;
-
-	for (p = data; p < data + len - tlen - 4; p++)
-		if (memcmp(p, tag, tlen) == 0)
-			return p;
-	return NULL;
-}
-
-static int q6afe_map_memory(struct q6afe *afe, dma_addr_t phys, u32 size)
-{
-	struct {
-		struct apr_hdr hdr;
-		u16 mem_pool_id;
-		u16 num_regions;
-		u32 property_flag;
-		u32 shm_addr_lsw;
-		u32 shm_addr_msw;
-		u32 mem_size_bytes;
-	} __packed cmd = {};
-	int ret;
-
-	cmd.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
-					   APR_HDR_LEN(APR_HDR_SIZE),
-					   APR_PKT_VER);
-	cmd.hdr.pkt_size = sizeof(cmd);
-	cmd.hdr.src_port = 0;
-	cmd.hdr.dest_port = 0;
-	cmd.hdr.token = AFE_CLK_TOKEN;
-	cmd.hdr.opcode = 0x000100EA; /* AFE_SERVICE_CMD_SHARED_MEM_MAP_REGIONS */
-	cmd.mem_pool_id = 3; /* ADSP_MEMORY_MAP_SHMEM8_4K_POOL */
-	cmd.num_regions = 1;
-	cmd.property_flag = 0;
-	cmd.shm_addr_lsw = lower_32_bits(phys);
-	cmd.shm_addr_msw = upper_32_bits(phys);
-	cmd.mem_size_bytes = PAGE_ALIGN(size);
-
-	afe->mmap_handle = 0;
-	ret = afe_apr_send_pkt(afe, (struct apr_pkt *)&cmd, NULL,
-			       0x000100EA);
-	if (ret) {
-		dev_err(afe->dev, "AFE SHARED_MEM_MAP failed: %d\n", ret);
-		return ret;
-	}
-
-	if (!afe->mmap_handle) {
-		dev_err(afe->dev, "AFE SHARED_MEM_MAP: no handle returned\n");
-		return -EINVAL;
-	}
-
-	dev_info(afe->dev, "AFE memory mapped: phys=0x%pad size=%u handle=0x%x\n",
-		 &phys, size, afe->mmap_handle);
-	return 0;
-}
-
-static int q6afe_send_cal_via_shmem(struct q6afe *afe, struct q6afe_port *port,
-				    void *cal_data, u32 cal_size)
-{
-	struct afe_port_cmd_set_param_v2 *param;
-	struct apr_pkt *pkt;
-	dma_addr_t phys;
-	void *virt;
-	int ret, pkt_size;
-
-	/* Allocate physically contiguous memory for cal data.
-	 * The ADSP reads from physical address, so we need contiguous pages.
-	 */
-	{
-		struct page *pg;
-		int order = get_order(PAGE_ALIGN(cal_size));
-
-		pg = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
-		if (!pg)
-			return -ENOMEM;
-		virt = page_address(pg);
-		phys = page_to_phys(pg);
-	}
-	if (!virt)
-		return -ENOMEM;
-
-	memcpy(virt, cal_data, cal_size);
-
-	/* Map to ADSP */
-	ret = q6afe_map_memory(afe, phys, cal_size);
-	if (ret)
-		goto free_mem;
-
-	/* Send SET_PARAM_V2 referencing the shared memory */
-	pkt_size = APR_HDR_SIZE + sizeof(*param);
-	pkt = kzalloc(pkt_size, GFP_KERNEL);
-	if (!pkt) {
-		ret = -ENOMEM;
-		goto free_mem;
-	}
-
-	param = (void *)pkt + APR_HDR_SIZE;
-	pkt->hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
-					    APR_HDR_LEN(APR_HDR_SIZE),
-					    APR_PKT_VER);
-	pkt->hdr.pkt_size = pkt_size;
-	pkt->hdr.src_port = 0;
-	pkt->hdr.dest_port = 0;
-	pkt->hdr.token = port->token;
-	pkt->hdr.opcode = AFE_PORT_CMD_SET_PARAM_V2;
-	param->port_id = port->id;
-	param->payload_size = cal_size;
-	param->payload_address_lsw = lower_32_bits(phys);
-	param->payload_address_msw = upper_32_bits(phys);
-	param->mem_map_handle = afe->mmap_handle;
-
-	dev_info(afe->dev,
-		 "AFE cal via shmem: port=0x%x size=%u phys=0x%pad handle=0x%x\n",
-		 port->id, cal_size, &phys, afe->mmap_handle);
-
-	ret = afe_apr_send_pkt(afe, pkt, port, AFE_PORT_CMD_SET_PARAM_V2);
-	if (ret)
-		dev_err(afe->dev, "AFE cal shmem send failed: %d\n", ret);
-	else
-		dev_info(afe->dev, "AFE cal via shmem: SUCCESS\n");
-
-	kfree(pkt);
-free_mem:
-	free_pages((unsigned long)virt, get_order(PAGE_ALIGN(cal_size)));
-	return ret;
-}
-
-static int q6afe_send_acdb_afe_cal(struct q6afe *afe, struct q6afe_port *port,
-				   u32 acdb_dev_id, u32 sample_rate)
-{
-	const struct firmware *fw;
-	const char *fname = "acdbdata/MTP_WCD9335_Handset_cal.acdb";
-	const u8 *lut_p, *cdft_p, *cdot_p, *pool_p;
-	u32 lut_sz, cdft_sz, cdot_sz, pool_sz;
-	u32 num_lut, i;
-	int ret = -ENOENT;
-
-	ret = request_firmware(&fw, fname, afe->dev);
-	if (ret) {
-		dev_info(afe->dev, "ACDB %s not found (%d), skipping cal\n",
-			 fname, ret);
-		return 0;
-	}
-
-	dev_info(afe->dev, "ACDB: loaded %s (%zu bytes)\n", fname, fw->size);
-
-	lut_p = acdb_find_tag(fw->data, fw->size, "AFECLUT0");
-	cdft_p = acdb_find_tag(fw->data, fw->size, "AFECCDFT");
-	cdot_p = acdb_find_tag(fw->data, fw->size, "AFECCDOT");
-	pool_p = acdb_find_tag(fw->data, fw->size, "DATAPOOL");
-	if (!lut_p || !cdft_p || !cdot_p || !pool_p) {
-		dev_warn(afe->dev, "ACDB: missing sections\n");
-		ret = 0;
-		goto out;
-	}
-
-	lut_sz = le32_to_cpup((__le32 *)(lut_p + 8)); lut_p += 12;
-	cdft_sz = le32_to_cpup((__le32 *)(cdft_p + 8)); cdft_p += 12;
-	cdot_sz = le32_to_cpup((__le32 *)(cdot_p + 8)); cdot_p += 12;
-	pool_sz = le32_to_cpup((__le32 *)(pool_p + 8)); pool_p += 12;
-
-	num_lut = le32_to_cpup((__le32 *)lut_p);
-	dev_info(afe->dev, "ACDB: AFECLUT0 has %u entries\n", num_lut);
-
-	for (i = 0; i < num_lut; i++) {
-		const u8 *entry = lut_p + 4 + i * 16;
-		u32 did = le32_to_cpup((__le32 *)(entry));
-		u32 rate = le32_to_cpup((__le32 *)(entry + 4));
-		u32 cdft_ofs = le32_to_cpup((__le32 *)(entry + 8));
-		u32 cdot_ofs = le32_to_cpup((__le32 *)(entry + 12));
-		u32 npairs, j, blob_sz = 0;
-		u8 *blob, *bp;
-
-		if (did != acdb_dev_id || rate != sample_rate)
-			continue;
-
-		if (cdft_ofs + 4 > cdft_sz) continue;
-		npairs = le32_to_cpup((__le32 *)(cdft_p + cdft_ofs));
-		if (cdft_ofs + 4 + npairs * 8 > cdft_sz) continue;
-		if (cdot_ofs + 4 > cdot_sz) continue;
-
-		for (j = 0; j < npairs; j++) {
-			u32 pool_ofs = le32_to_cpup((__le32 *)(cdot_p + cdot_ofs + 4 + j * 4));
-			u32 dsz;
-			if (pool_ofs + 4 > pool_sz) continue;
-			dsz = le32_to_cpup((__le32 *)(pool_p + pool_ofs));
-			blob_sz += 12 + ALIGN(dsz, 4);
-		}
-		if (blob_sz == 0) continue;
-
-		blob = kzalloc(blob_sz, GFP_KERNEL);
-		if (!blob) { ret = -ENOMEM; goto out; }
-
-		bp = blob;
-		for (j = 0; j < npairs; j++) {
-			u32 mid = le32_to_cpup((__le32 *)(cdft_p + cdft_ofs + 4 + j * 8));
-			u32 pid = le32_to_cpup((__le32 *)(cdft_p + cdft_ofs + 4 + j * 8 + 4));
-			u32 pool_ofs = le32_to_cpup((__le32 *)(cdot_p + cdot_ofs + 4 + j * 4));
-			u32 dsz;
-			if (pool_ofs + 4 > pool_sz) { kfree(blob); goto out; }
-			dsz = le32_to_cpup((__le32 *)(pool_p + pool_ofs));
-			*((u32 *)bp) = cpu_to_le32(mid); bp += 4;
-			*((u32 *)bp) = cpu_to_le32(pid); bp += 4;
-			*((u16 *)bp) = cpu_to_le16(dsz); bp += 2;
-			*((u16 *)bp) = 0; bp += 2;
-			if (dsz > 0 && pool_ofs + 4 + dsz <= pool_sz)
-				memcpy(bp, pool_p + pool_ofs + 4, dsz);
-			bp += ALIGN(dsz, 4);
-		}
-
-		/* Log module IDs in this cal blob */
-		{
-			u8 *p = blob;
-
-			for (j = 0; j < npairs && p < blob + blob_sz; j++) {
-				u32 m = le32_to_cpup((__le32 *)p);
-				u32 pid2 = le32_to_cpup((__le32 *)(p + 4));
-				u16 sz = le16_to_cpup((__le16 *)(p + 8));
-
-				dev_info(afe->dev,
-					 "ACDB cal[%d]: mid=0x%x pid=0x%x sz=%u\n",
-					 j, m, pid2, sz);
-				p += 12 + ALIGN(sz, 4);
-			}
-		}
-		dev_info(afe->dev,
-			 "ACDB: sending AFE cal dev=%u rate=%u (%u bytes, %u params)\n",
-			 did, rate, blob_sz, npairs);
-
-		/* Send cal via shared memory (matching downstream) */
-		ret = q6afe_send_cal_via_shmem(afe, port, blob, blob_sz);
-		if (ret)
-			dev_warn(afe->dev, "ACDB shmem cal failed: %d\n", ret);
-		kfree(blob);
-		goto out;
-	}
-
-	dev_info(afe->dev, "ACDB: no AFE cal for dev=%u rate=%u\n",
-		 acdb_dev_id, sample_rate);
-	ret = 0;
-out:
-	release_firmware(fw);
-	return ret;
-}
-
-/*
- * Send CDC configuration to ADSP, matching downstream msm8952-slimbus.c
- * ordering: REG_CFG → PAGE_CFG → SLAVE_CFG → (INIT triggered by SLAVE_CFG)
- * → PAGE_CFG again.
- *
- * Downstream sends REG_CFG BEFORE SLAVE_CFG. This matters because
- * SLAVE_CFG triggers REG_CFG_INIT internally.
- */
-static int q6afe_send_cdc_slimbus_slave_cfg(struct q6afe *afe)
-{
-	struct afe_param_cdc_slimbus_slave_cfg slave_cfg = {};
-	int ret, i;
-
-	/* --- Step 1: CDC_REG_CFG entries (PGD port register metadata) --- */
-	{
-		struct afe_param_cdc_reg_cfg_t {
-			u32 minor_version;
-			u32 reg_logical_addr;
-			u32 reg_field_type;
-			u32 reg_field_bit_mask;
-			u16 reg_bit_width;
-			u16 reg_offset_scale;
-		} __packed;
-
-		/*
-		 * Full downstream tasha audio_reg_cfg table (22 entries).
-		 * Register addresses = TASHA_REGISTER_START_OFFSET (0x800) + reg.
-		 * Field types from wcd9xxx-common-v2.h enum (starts at 0).
-		 */
-		static const struct afe_param_cdc_reg_cfg_t cdc_regs[] = {
-			/* MAD (Microphone Activity Detection) */
-			{ 1, 0x800+0x0281, 4, 0x01, 8, 0 },  /* HW_MAD_AUDIO_ENABLE */
-			{ 1, 0x800+0x0285, 7, 0x0F, 8, 0 },  /* HW_MAD_AUDIO_SLEEP_TIME */
-			{ 1, 0x800+0x0286, 10, 0x01, 8, 0 }, /* HW_MAD_TX_AUDIO_SWITCH_OFF */
-			/* Interrupt routing */
-			{ 1, 0x800+0x0081, 13, 0x02, 8, 0 }, /* MAD_AUDIO_INT_DEST_SELECT */
-			{ 1, 0x800+0x00a4, 18, 0x01, 8, 0 }, /* MAD_AUDIO_INT_MASK */
-			{ 1, 0x800+0x00ac, 23, 0x01, 8, 0 }, /* MAD_AUDIO_INT_STATUS */
-			{ 1, 0x800+0x00b4, 28, 0x01, 8, 0 }, /* MAD_AUDIO_INT_CLEAR */
-			/* VBAT */
-			{ 1, 0x800+0x0081, 17, 0x02, 8, 0 }, /* VBAT_INT_DEST_SELECT */
-			{ 1, 0x800+0x00a4, 22, 0x08, 8, 0 }, /* VBAT_INT_MASK */
-			{ 1, 0x800+0x00ac, 27, 0x08, 8, 0 }, /* VBAT_INT_STATUS */
-			{ 1, 0x800+0x00b4, 32, 0x08, 8, 0 }, /* VBAT_INT_CLEAR */
-			/* VBAT release */
-			{ 1, 0x800+0x0081, 216, 0x02, 8, 0 }, /* VBAT_RELEASE_INT_DEST */
-			{ 1, 0x800+0x00a4, 217, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_MASK */
-			{ 1, 0x800+0x00ac, 218, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_STATUS */
-			{ 1, 0x800+0x00b4, 219, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_CLEAR */
-			/* SLIMbus PGD ports */
-			{ 1, 0x850, 196, 0x1E, 8, 1 }, /* SB_PGD_PORT_TX_WATERMARK */
-			{ 1, 0x850, 197, 0x01, 8, 1 }, /* SB_PGD_PORT_TX_ENABLE */
-			{ 1, 0x840, 198, 0x1E, 8, 1 }, /* SB_PGD_PORT_RX_WATERMARK */
-			{ 1, 0x840, 199, 0x01, 8, 1 }, /* SB_PGD_PORT_RX_ENABLE */
-			/* AANC */
-			{ 1, 0x800+0x0a0b, 204, 0x04, 8, 0 }, /* AANC_FF_GAIN_ADAPTIVE */
-			{ 1, 0x800+0x0a0b, 205, 0x08, 8, 0 }, /* AANC_FFGAIN_ADAPTIVE_EN */
-			{ 1, 0x800+0x0a0e, 206, 0xFF, 8, 0 }, /* AANC_GAIN_CONTROL */
-		};
-		int ok = 0;
-
-		for (i = 0; i < ARRAY_SIZE(cdc_regs); i++) {
-			ret = q6afe_set_param(afe, NULL,
-					      (void *)&cdc_regs[i],
-					      AFE_PARAM_ID_CDC_REG_CFG,
-					      AFE_MODULE_CDC_DEV_CFG,
-					      sizeof(cdc_regs[i]),
-					      AFE_CLK_TOKEN);
-			if (!ret)
-				ok++;
-			else
-				dev_info(afe->dev,
-					 "CDC_REG_CFG[%d] type=%d addr=0x%x: REJECTED\n",
-					 i, cdc_regs[i].reg_field_type,
-					 cdc_regs[i].reg_logical_addr);
-		}
-		dev_info(afe->dev, "CDC_REG_CFG: %d/%zu accepted\n",
-			 ok, ARRAY_SIZE(cdc_regs));
-	}
-
-	/* --- Step 2: CDC_REG_PAGE_CFG (before SLAVE_CFG) --- */
-	{
-		struct {
-			u32 minor_version;
-			u32 enable;
-			u32 proc_id;
-		} __packed page_cfg = { 1, 1, 1 };
-
-		ret = q6afe_set_param(afe, NULL, &page_cfg,
-				      0x00010296,
-				      AFE_MODULE_CDC_DEV_CFG,
-				      sizeof(page_cfg), AFE_CLK_TOKEN);
-		dev_info(afe->dev, "CDC_REG_PAGE_CFG: %d\n", ret);
-	}
-
-	/* --- Step 3: CDC_SLIMBUS_SLAVE_CFG --- */
-	slave_cfg.minor_version = 1;
-	slave_cfg.device_enum_addr_lsw = 0x01a00100;
-	slave_cfg.device_enum_addr_msw = 0x0217;
-	slave_cfg.tx_slave_port_offset = 0;
-	slave_cfg.rx_slave_port_offset = 16;
-
-	ret = q6afe_set_param(afe, NULL, &slave_cfg,
-			      AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG,
-			      AFE_MODULE_CDC_DEV_CFG,
-			      sizeof(slave_cfg), AFE_CLK_TOKEN);
-	dev_info(afe->dev, "CDC_SLIMBUS_SLAVE_CFG: %d\n", ret);
-
-	/* --- Step 4: CDC_REG_CFG_INIT (downstream sends after SLAVE_CFG) --- */
-	if (!ret) {
-		ret = q6afe_set_param(afe, NULL, NULL,
-				      AFE_PARAM_ID_CDC_REG_CFG_INIT,
-				      AFE_MODULE_CDC_DEV_CFG,
-				      0, AFE_CLK_TOKEN);
-		dev_info(afe->dev, "CDC_REG_CFG_INIT: %d\n", ret);
-	}
-
-	/* --- Step 5: CDC_REG_PAGE_CFG again (downstream sends twice) --- */
-	{
-		struct {
-			u32 minor_version;
-			u32 enable;
-			u32 proc_id;
-		} __packed page_cfg = { 1, 1, 1 };
-
-		ret = q6afe_set_param(afe, NULL, &page_cfg,
-				      0x00010296,
-				      AFE_MODULE_CDC_DEV_CFG,
-				      sizeof(page_cfg), AFE_CLK_TOKEN);
-		dev_info(afe->dev, "CDC_REG_PAGE_CFG(2): %d\n", ret);
-	}
-
-	return 0; /* non-fatal */
-}
-
 /**
  * q6afe_port_start() - Start a afe port
  *
@@ -2086,84 +1669,6 @@ int q6afe_port_start(struct q6afe_port *port)
 	int pkt_size;
 	void *p __free(kfree) = NULL;
 
-	/*
-	 * Send CDC SLIMbus slave config + register config once.
-	 * Downstream techpack sends this during codec init via
-	 * AFE_SVC_CMD_SET_PARAM with AFE_MODULE_CDC_DEV_CFG.
-	 */
-	if ((port_id == 0x4001 || port_id == 0x4000) &&
-	    !afe->slim_slave_cfg_sent) {
-		ret = q6afe_send_cdc_slimbus_slave_cfg(afe);
-		if (ret)
-			dev_warn(afe->dev,
-				 "CDC slave cfg failed: %d (non-fatal)\n", ret);
-		else
-			afe->slim_slave_cfg_sent = true;
-	}
-
-	/* Debug: dump SLIMbus AFE config before sending */
-	if (port_id == 0x4001 || port_id == 0x4000) {
-		struct afe_param_id_slimbus_cfg *sc = &port->port_cfg.slim_cfg;
-
-		dev_info(afe->dev,
-			 "AFE SLIM port 0x%x: ver=%d dev=%d bw=%d rate=%d fmt=%d nch=%d ch=[%d,%d,%d,%d]\n",
-			 port_id, sc->sb_cfg_minor_version,
-			 sc->slimbus_dev_id, sc->bit_width,
-			 sc->sample_rate, sc->data_format,
-			 sc->num_channels,
-			 sc->shared_ch_mapping[0], sc->shared_ch_mapping[1],
-			 sc->shared_ch_mapping[2], sc->shared_ch_mapping[3]);
-	}
-
-	/* ACDB AFE cal: infrastructure ready (shared memory works) but
-	 * earpiece doesn't need AFE-level cal — downstream also skips it.
-	 * The ADSP rejects module-specific cal with EBADPARAM when no
-	 * topology is loaded, and downstream also runs without topology.
-	 */
-
-	/* Send topology ID for SLIMbus ports */
-	if (port_id == 0x4001 || port_id == 0x4000) {
-		u32 topology = 0;
-
-		ret = q6afe_port_set_param_v2(port, &topology,
-					      AFE_PARAM_ID_SET_TOPOLOGY,
-					      AFE_MODULE_AUDIO_DEV_INTERFACE,
-					      sizeof(topology));
-		if (ret)
-			dev_warn(afe->dev,
-				 "AFE SET_TOPOLOGY for port 0x%x failed %d\n",
-				 port_id, ret);
-	}
-
-	/* Send PORT_MEDIA_TYPE for SLIMbus ports (required by ADSP to
-	 * configure the audio data path before DEVICE_START) */
-	if (port_id == 0x4001 || port_id == 0x4000) {
-		struct {
-			u32 minor_version;
-			u32 sample_rate;
-			u16 bit_width;
-			u16 num_channels;
-			u16 data_format;
-			u16 reserved;
-		} __packed media_type = {
-			.minor_version = 1,
-			.sample_rate = port->port_cfg.slim_cfg.sample_rate,
-			.bit_width = port->port_cfg.slim_cfg.bit_width,
-			.num_channels = port->port_cfg.slim_cfg.num_channels,
-			.data_format = 0, /* AFE_PORT_DATA_FORMAT_PCM */
-			.reserved = 0,
-		};
-
-		ret = q6afe_port_set_param_v2(port, &media_type,
-					      0x000102a7, /* AFE_PARAM_ID_PORT_MEDIA_TYPE */
-					      0x000102a6, /* AFE_MODULE_PORT */
-					      sizeof(media_type));
-		if (ret)
-			dev_warn(afe->dev,
-				 "AFE PORT_MEDIA_TYPE for port 0x%x: %d\n",
-				 port_id, ret);
-	}
-
 	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
 				       AFE_MODULE_AUDIO_DEV_INTERFACE,
 				       sizeof(port->port_cfg));
@@ -2171,19 +1676,6 @@ int q6afe_port_start(struct q6afe_port *port)
 		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\n",
 			port_id, ret);
 		return ret;
-	}
-
-	/* Send AFE_PARAM_ID_ENABLE to activate the port's audio path */
-	{
-		u32 enable = 1;
-
-		ret = q6afe_port_set_param_v2(port, &enable, 0x00010203,
-					      AFE_MODULE_AUDIO_DEV_INTERFACE,
-					      sizeof(enable));
-		if (ret)
-			dev_info(afe->dev,
-				 "AFE ENABLE param for port 0x%x: %d (non-fatal)\n",
-				 port_id, ret);
 	}
 
 	if (port->scfg) {
@@ -2220,9 +1712,6 @@ int q6afe_port_start(struct q6afe_port *port)
 	if (ret)
 		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\n",
 			port_id, ret);
-	else
-		dev_info(afe->dev, "AFE DEVICE_START port 0x%x: SUCCESS\n",
-			 port_id);
 
 	return ret;
 }

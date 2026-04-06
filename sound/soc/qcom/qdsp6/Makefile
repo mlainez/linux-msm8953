@@ -18,9 +18,6 @@ obj-$(CONFIG_SND_SOC_QDSP6_Q6VOICE) += q6cvp.o q6cvs.o q6mvm.o q6voice-common.o
 obj-$(CONFIG_SND_SOC_QDSP6_Q6VOICE) += q6voice.o
 obj-$(CONFIG_SND_SOC_QDSP6_Q6VOICE_DAI) += q6voice-dai.o
 
-obj-$(CONFIG_SND_SOC_QDSP6_AFE) += snd-msm-audio-cal.o
-snd-msm-audio-cal-y := msm_audio_cal.o
-
 obj-$(CONFIG_SND_SOC_QDSP6_APM) += snd-q6apm.o
 obj-$(CONFIG_SND_SOC_QDSP6_APM_DAI) += q6apm-dai.o
 obj-$(CONFIG_SND_SOC_QDSP6_APM_LPASS_DAI) += q6apm-lpass-dais.o

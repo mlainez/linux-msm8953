@@ -359,11 +359,6 @@ static int q6adm_device_open(struct q6adm *adm, struct q6copp *copp,
 	if (ret)
 		return ret;
 
-	dev_info(adm->dev,
-		 "ADM DEVICE_OPEN: port=0x%x topo=0x%x ch=%d bw=%d rate=%d path=%d flags=0x%x\n",
-		 afe_port, topology, channel_mode, bit_width, rate,
-		 path, open->flags);
-
 	return q6adm_apr_send_copp_pkt(adm, copp, pkt, ADM_CMDRSP_DEVICE_OPEN_V5);
 }
 
