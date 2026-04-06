@@ -717,6 +717,12 @@
 			no-map;
 		};
 
+		adsp_mem: adsp-region {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0 0x400000>;
+		};
+
 		cont_splash_mem: cont-splash@90001000 {
 			reg = <0x0 0x90001000 0x0 0x13ff000>;
 			no-map;
@@ -3255,6 +3261,7 @@
 					qcom,smd-channels = "fastrpcsmd-apps-dsp";
 					label = "adsp";
 					qcom,non-secure-domain;
+					memory-region = <&adsp_mem>;
 					#address-cells = <1>;
 					#size-cells = <0>;
 
