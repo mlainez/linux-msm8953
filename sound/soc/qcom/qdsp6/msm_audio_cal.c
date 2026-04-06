@@ -52,6 +52,9 @@ struct cal_block {
 static DEFINE_MUTEX(cal_lock);
 static struct list_head cal_blocks = LIST_HEAD_INIT(cal_blocks);
 
+/* Per cal_type ION mapping: ALLOCATE stores fd, SET uses it */
+static int cal_type_ion_fd[MAX_CAL_TYPES];
+
 /* Stored topology IDs from ACDB */
 static int adm_topology; /* ADM_TOPOLOGY_CAL_TYPE = 9 */
 static int afe_topology; /* AFE_TOPOLOGY_CAL_TYPE = 23 */
@@ -111,17 +114,29 @@ static long msm_audio_cal_ioctl(struct file *f, unsigned int cmd,
 				int32_t version;
 			} cal_hdr;
 			struct {
+				int32_t cal_size;
 				int32_t mem_handle;
 			} cal_data;
 		} __packed alloc_data;
 
-		if (hdr.data_size >= sizeof(alloc_data)) {
-			if (!copy_from_user(&alloc_data, (void __user *)arg,
-					    sizeof(alloc_data))) {
-				int ion_fd = alloc_data.cal_data.mem_handle;
+		if (hdr.data_size >= sizeof(hdr)) {
+			/* Dump raw ALLOCATE data to understand the struct */
+			u8 raw[64];
+			int dump_sz = min((int)hdr.data_size, 64);
 
-				pr_info("msm_audio_cal: ALLOCATE cal_type=%d ion_fd=%d\n",
-					hdr.cal_type, ion_fd);
+			if (!copy_from_user(raw, (void __user *)arg, dump_sz)) {
+				u32 *w = (u32 *)raw;
+				int ion_fd = (dump_sz >= 28) ? w[6] : 0;
+
+				pr_info("msm_audio_cal: ALLOCATE cal_type=%d size=%d raw=[%08x %08x %08x %08x %08x %08x %08x %08x]\n",
+					hdr.cal_type, dump_sz,
+					w[0], w[1], w[2], w[3], w[4], w[5],
+					(dump_sz >= 28) ? w[6] : 0,
+					(dump_sz >= 32) ? w[7] : 0);
+
+				/* Store ION fd for this cal_type so SET can find it */
+				if (hdr.cal_type >= 0 && hdr.cal_type < MAX_CAL_TYPES)
+					cal_type_ion_fd[hdr.cal_type] = ion_fd;
 
 				/* Map the ION fd to our internal alloc entry.
 				 * The ION fd was returned by ION_IOC_SHARE.
@@ -169,6 +184,7 @@ static long msm_audio_cal_ioctl(struct file *f, unsigned int cmd,
 				int32_t version;
 			} cal_hdr;
 			struct {
+				int32_t cal_size;
 				int32_t mem_handle;
 			} cal_data;
 		} __packed set_data;
@@ -251,7 +267,7 @@ static long msm_audio_cal_ioctl(struct file *f, unsigned int cmd,
 				}
 			}
 
-			/* Fallback: try as raw handle */
+			/* Fallback 1: try as raw handle */
 			if (!cal_buf) {
 				mutex_lock(&ion_lock);
 				list_for_each_entry(entry, &ion_allocs, list) {
@@ -263,6 +279,32 @@ static long msm_audio_cal_ioctl(struct file *f, unsigned int cmd,
 					}
 				}
 				mutex_unlock(&ion_lock);
+			}
+
+			/* Fallback 2: use the ION fd stored during ALLOCATE */
+			if (!cal_buf && hdr.cal_type >= 0 &&
+			    hdr.cal_type < MAX_CAL_TYPES &&
+			    cal_type_ion_fd[hdr.cal_type] > 0) {
+				int stored_fd = cal_type_ion_fd[hdr.cal_type];
+				struct fd f2 = fdget(stored_fd);
+
+				if (fd_file(f2) && fd_file(f2)->private_data) {
+					int h = (int)(long)fd_file(f2)->private_data;
+
+					mutex_lock(&ion_lock);
+					list_for_each_entry(entry, &ion_allocs, list) {
+						if (entry->handle == h) {
+							cal_buf = entry->vaddr;
+							cal_sz = entry->size;
+							cal_phys = entry->paddr;
+							pr_info("msm_audio_cal: resolved cal_type=%d via stored fd=%d → handle=%d\n",
+								hdr.cal_type, stored_fd, h);
+							break;
+						}
+					}
+					mutex_unlock(&ion_lock);
+					fdput(f2);
+				}
 			}
 
 			if (cal_buf && cal_sz > 0) {
@@ -358,7 +400,9 @@ struct ion_handle_data_user {
 
 #define ION_IOC_ALLOC _IOWR(ION_IOC_MAGIC, 0, struct ion_alloc_data_user)
 #define ION_IOC_FREE  _IOWR(ION_IOC_MAGIC, 1, struct ion_handle_data_user)
+#define ION_IOC_MAP   _IOWR(ION_IOC_MAGIC, 2, struct ion_fd_data_user)
 #define ION_IOC_SHARE _IOWR(ION_IOC_MAGIC, 4, struct ion_fd_data_user)
+#define ION_IOC_IMPORT _IOWR(ION_IOC_MAGIC, 5, struct ion_fd_data_user)
 
 static const struct file_operations ion_shim_fops;
 static int ion_handle_counter = 1;
@@ -416,6 +460,8 @@ static long ion_shim_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		return 0;
 	}
 
+	case ION_IOC_MAP:
+	case ION_IOC_IMPORT:
 	case ION_IOC_SHARE: {
 		struct ion_fd_data_user fd_data;
 		/* For now, return a dummy fd - the kernel module handles
