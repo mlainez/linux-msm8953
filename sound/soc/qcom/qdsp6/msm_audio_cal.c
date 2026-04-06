@@ -433,15 +433,28 @@ static long ion_shim_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			return -ENOMEM;
 
 		entry->size = PAGE_ALIGN(alloc.len);
-		/* Use page allocator instead of DMA — simpler and works
-		 * without a proper DMA-capable device */
-		entry->vaddr = (void *)__get_free_pages(GFP_KERNEL | __GFP_ZERO,
-							get_order(entry->size));
-		if (!entry->vaddr) {
-			kfree(entry);
-			return -ENOMEM;
+		/*
+		 * Allocate DMA-coherent memory accessible to ADSP.
+		 * Use the misc device's parent or set DMA mask explicitly.
+		 * The ADSP needs to read this memory via SMMU, so regular
+		 * kernel pages won't work — need proper DMA allocation.
+		 */
+		if (ion_dev) {
+			dma_set_mask_and_coherent(ion_dev, DMA_BIT_MASK(36));
+			entry->vaddr = dma_alloc_coherent(ion_dev, entry->size,
+							  &entry->paddr, GFP_KERNEL);
 		}
-		entry->paddr = virt_to_phys(entry->vaddr);
+		if (!entry->vaddr) {
+			/* Fallback to page allocator */
+			entry->vaddr = (void *)__get_free_pages(
+				GFP_KERNEL | __GFP_ZERO,
+				get_order(entry->size));
+			if (!entry->vaddr) {
+				kfree(entry);
+				return -ENOMEM;
+			}
+			entry->paddr = virt_to_phys(entry->vaddr);
+		}
 
 		mutex_lock(&ion_lock);
 		entry->handle = ion_handle_counter++;

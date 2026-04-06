@@ -380,6 +380,7 @@ struct q6afe {
 	wait_queue_head_t wait;
 	struct list_head port_list;
 	spinlock_t port_list_lock;
+	u32 mmap_handle;
 };
 
 struct afe_port_cmd_device_start {
@@ -980,6 +981,7 @@ static int q6afe_callback(struct apr_device *adev, struct apr_resp_pkt *data)
 		case AFE_PORT_CMD_DEVICE_STOP:
 		case AFE_PORT_CMD_DEVICE_START:
 		case AFE_SVC_CMD_SET_PARAM:
+		case 0x000100EA: /* AFE_SERVICE_CMD_SHARED_MEM_MAP_REGIONS */
 			port = q6afe_find_port(afe, hdr->token);
 			if (port) {
 				port->result = *res;
@@ -999,6 +1001,13 @@ static int q6afe_callback(struct apr_device *adev, struct apr_resp_pkt *data)
 	case AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST:
 		afe->result.opcode = hdr->opcode;
 		afe->result.status = res->status;
+		wake_up(&afe->wait);
+		break;
+	case 0x000100EB: /* AFE_SERVICE_CMDRSP_SHARED_MEM_MAP_REGIONS */
+		afe->mmap_handle = *((u32 *)data->payload);
+		afe->result.opcode = 0x000100EA; /* match waiter */
+		afe->result.status = 0;
+		dev_info(afe->dev, "AFE mmap_handle = 0x%x\n", afe->mmap_handle);
 		wake_up(&afe->wait);
 		break;
 	default:
@@ -1668,6 +1677,88 @@ int q6afe_port_start(struct q6afe_port *port)
 	struct apr_pkt *pkt;
 	int pkt_size;
 	void *p __free(kfree) = NULL;
+
+	/*
+	 * Send ACDB calibration to ADSP via shared memory for SLIMbus ports.
+	 * The acdb_loader stores cal data in ION buffers via msm_audio_cal.
+	 * We forward it to the ADSP using AFE_PORT_CMD_SET_PARAM_V2 with
+	 * the physical address and a shared memory map handle.
+	 */
+	if (port_id == 0x4000 || port_id == 0x4001) {
+		extern int msm_audio_cal_get_cal(int, void **, size_t *, dma_addr_t *);
+		void *cal_buf;
+		size_t cal_sz;
+		dma_addr_t cal_phys;
+		/* cal_type 15 = AFE cal, 17 = AFE common */
+		int cal_type = (port_id & 1) ? 17 : 15;
+
+		if (msm_audio_cal_get_cal(cal_type, &cal_buf, &cal_sz, &cal_phys) == 0
+		    && cal_phys && cal_sz > 0) {
+			/* Map physical memory to ADSP */
+			if (!afe->mmap_handle) {
+				struct {
+					struct apr_hdr hdr;
+					u16 mem_pool_id;
+					u16 num_regions;
+					u32 property_flag;
+					u32 shm_addr_lsw;
+					u32 shm_addr_msw;
+					u32 mem_size_bytes;
+				} __packed cmd = {};
+
+				cmd.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
+					APR_HDR_LEN(APR_HDR_SIZE), APR_PKT_VER);
+				cmd.hdr.pkt_size = sizeof(cmd);
+				cmd.hdr.token = AFE_CLK_TOKEN;
+				cmd.hdr.opcode = 0x000100EA;
+				cmd.mem_pool_id = 3;
+				cmd.num_regions = 1;
+				cmd.shm_addr_lsw = lower_32_bits(cal_phys);
+				cmd.shm_addr_msw = upper_32_bits(cal_phys);
+				cmd.mem_size_bytes = PAGE_ALIGN(cal_sz);
+
+				afe->mmap_handle = 0;
+				ret = afe_apr_send_pkt(afe, (struct apr_pkt *)&cmd,
+						       NULL, 0x000100EA);
+				if (ret)
+					dev_warn(afe->dev, "AFE cal mmap failed: %d\n", ret);
+			}
+
+			if (afe->mmap_handle) {
+				struct afe_port_cmd_set_param_v2 *param;
+				int sz = APR_HDR_SIZE + sizeof(*param);
+				void *pp = kzalloc(sz, GFP_KERNEL);
+
+				if (pp) {
+					struct apr_pkt *cpkt = pp;
+
+					param = pp + APR_HDR_SIZE;
+					cpkt->hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
+						APR_HDR_LEN(APR_HDR_SIZE), APR_PKT_VER);
+					cpkt->hdr.pkt_size = sz;
+					cpkt->hdr.token = port->token;
+					cpkt->hdr.opcode = AFE_PORT_CMD_SET_PARAM_V2;
+					param->port_id = port_id;
+					param->payload_size = cal_sz;
+					param->payload_address_lsw = lower_32_bits(cal_phys);
+					param->payload_address_msw = upper_32_bits(cal_phys);
+					param->mem_map_handle = afe->mmap_handle;
+
+					ret = afe_apr_send_pkt(afe, cpkt, port,
+							       AFE_PORT_CMD_SET_PARAM_V2);
+					if (ret)
+						dev_warn(afe->dev,
+							 "AFE cal send for port 0x%x: %d\n",
+							 port_id, ret);
+					else
+						dev_info(afe->dev,
+							 "AFE cal sent OK: port=0x%x type=%d sz=%zu\n",
+							 port_id, cal_type, cal_sz);
+					kfree(pp);
+				}
+			}
+		}
+	}
 
 	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
 				       AFE_MODULE_AUDIO_DEV_INTERFACE,
