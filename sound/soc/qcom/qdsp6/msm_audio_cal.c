@@ -95,13 +95,65 @@ static long msm_audio_cal_ioctl(struct file *f, unsigned int cmd,
 		_IOC_NR(cmd), hdr.cal_type, hdr.data_size);
 
 	switch (cmd) {
-	case AUDIO_ALLOCATE_CALIBRATION:
-		/* Userspace wants to register a cal block.
-		 * For now, just acknowledge it. The actual shared memory
-		 * setup happens when SET_CALIBRATION is called.
+	case AUDIO_ALLOCATE_CALIBRATION: {
+		/*
+		 * Userspace registers a cal block with an ION buffer.
+		 * The full struct is: audio_cal_header + cal_type_header +
+		 * cal_data { int32_t mem_handle; }.
+		 * mem_handle is the ION shared fd from ION_IOC_SHARE.
+		 * We need to store the mapping: mem_handle → ION alloc entry
+		 * so that SET_CALIBRATION can find the buffer.
 		 */
-		pr_info("msm_audio_cal: ALLOCATE cal_type=%d\n", hdr.cal_type);
+		struct {
+			struct audio_cal_header hdr2;
+			struct {
+				int32_t buffer_number;
+				int32_t version;
+			} cal_hdr;
+			struct {
+				int32_t mem_handle;
+			} cal_data;
+		} __packed alloc_data;
+
+		if (hdr.data_size >= sizeof(alloc_data)) {
+			if (!copy_from_user(&alloc_data, (void __user *)arg,
+					    sizeof(alloc_data))) {
+				int ion_fd = alloc_data.cal_data.mem_handle;
+
+				pr_info("msm_audio_cal: ALLOCATE cal_type=%d ion_fd=%d\n",
+					hdr.cal_type, ion_fd);
+
+				/* Map the ION fd to our internal alloc entry.
+				 * The ION fd was returned by ION_IOC_SHARE.
+				 * private_data of that fd contains the handle.
+				 */
+				if (ion_fd > 0) {
+					struct fd f = fdget(ion_fd);
+
+					if (fd_file(f) && fd_file(f)->private_data) {
+						int ion_handle = (int)(long)fd_file(f)->private_data;
+						struct ion_alloc_entry *entry;
+
+						mutex_lock(&ion_lock);
+						list_for_each_entry(entry, &ion_allocs, list) {
+							if (entry->handle == ion_handle) {
+								/* Create alias: ion_fd → same entry */
+								pr_info("msm_audio_cal: mapped ion_fd=%d → handle=%d phys=%pad\n",
+									ion_fd, ion_handle, &entry->paddr);
+								break;
+							}
+						}
+						mutex_unlock(&ion_lock);
+						fdput(f);
+					}
+				}
+			}
+		} else {
+			pr_info("msm_audio_cal: ALLOCATE cal_type=%d (no mem_handle)\n",
+				hdr.cal_type);
+		}
 		break;
+	}
 
 	case AUDIO_SET_CALIBRATION: {
 		/*
@@ -167,23 +219,51 @@ static long msm_audio_cal_ioctl(struct file *f, unsigned int cmd,
 			}
 		}
 
-		/* Look up the ION allocation by handle to find the cal data */
+		/* Look up the ION allocation by mem_handle.
+		 * mem_handle is the ION shared fd from ALLOCATE.
+		 * Resolve: fd → file → private_data (ION handle) → alloc entry
+		 */
 		{
 			struct ion_alloc_entry *entry;
 			void *cal_buf = NULL;
 			size_t cal_sz = 0;
 			dma_addr_t cal_phys = 0;
+			int ion_fd = set_data.cal_data.mem_handle;
 
-			mutex_lock(&ion_lock);
-			list_for_each_entry(entry, &ion_allocs, list) {
-				if (entry->handle == set_data.cal_data.mem_handle) {
-					cal_buf = entry->vaddr;
-					cal_sz = entry->size;
-					cal_phys = entry->paddr;
-					break;
+			/* Try resolving as ION fd first */
+			if (ion_fd > 0) {
+				struct fd f = fdget(ion_fd);
+
+				if (fd_file(f) && fd_file(f)->private_data) {
+					int ion_handle = (int)(long)fd_file(f)->private_data;
+
+					mutex_lock(&ion_lock);
+					list_for_each_entry(entry, &ion_allocs, list) {
+						if (entry->handle == ion_handle) {
+							cal_buf = entry->vaddr;
+							cal_sz = entry->size;
+							cal_phys = entry->paddr;
+							break;
+						}
+					}
+					mutex_unlock(&ion_lock);
+					fdput(f);
 				}
 			}
-			mutex_unlock(&ion_lock);
+
+			/* Fallback: try as raw handle */
+			if (!cal_buf) {
+				mutex_lock(&ion_lock);
+				list_for_each_entry(entry, &ion_allocs, list) {
+					if (entry->handle == ion_fd) {
+						cal_buf = entry->vaddr;
+						cal_sz = entry->size;
+						cal_phys = entry->paddr;
+						break;
+					}
+				}
+				mutex_unlock(&ion_lock);
+			}
 
 			if (cal_buf && cal_sz > 0) {
 				/* Log first few bytes of cal data */
