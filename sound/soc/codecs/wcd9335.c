@@ -1636,8 +1636,7 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 	struct list_head *slim_ch_list = &dai_data->slim_ch_list;
 	struct slim_stream_config *cfg = &dai_data->sconfig;
 	struct wcd9335_slim_ch *ch;
-	u16 payload = 0;
-	int ret, i;
+	int i;
 
 	cfg->ch_count = 0;
 	cfg->direction = direction;
@@ -1647,7 +1646,6 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 	dev_info(wcd->dev, "slim_set_hw_params: dir=%d\n", direction);
 	list_for_each_entry(ch, slim_ch_list, list) {
 		cfg->ch_count++;
-		payload |= 1 << ch->shift;
 		cfg->port_mask |= BIT(ch->port);
 	}
 
@@ -1656,61 +1654,21 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 		return -ENOMEM;
 
 	/*
-	 * PGD port registers: route through the IFC device via regmap.
-	 * The ADSP only forwards element access to the IFC device (LA=199),
-	 * not the PGD device (LA=200). MULTI_CHNL registers are on page 1
-	 * (offsets 0x100-0x1FF) and PORT_CFG on page 0 — regmap paging
-	 * handles both correctly now that the page cache conflict is fixed.
+	 * Do NOT write MULTI_CHNL or per-port PORT_CFG from the kernel.
+	 * LineageOS investigation shows the downstream kernel only sets the
+	 * global RX PORT_CFG at 0x040 (via CDC_REG_CFG from ADSP) — no
+	 * per-port PORT_CFG or MULTI_CHNL writes are visible on the IFC
+	 * device during working earpiece playback. The ADSP handles
+	 * MULTI_CHNL and port configuration internally when it processes
+	 * CONNECT_SINK and AFE_DEVICE_START.
 	 */
 	i = 0;
-	list_for_each_entry(ch, slim_ch_list, list) {
+	list_for_each_entry(ch, slim_ch_list, list)
 		cfg->chs[i++] = ch->ch_num;
-		if (direction == SNDRV_PCM_STREAM_PLAYBACK) {
-			ret = regmap_write(wcd->regmap,
-				WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(ch->port),
-				payload);
-			dev_info(wcd->dev, "MULTI_CHNL write via regmap: reg=0x%x val=0x%x ret=%d\n",
-				 WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(ch->port),
-				 payload, ret);
-			if (ret < 0)
-				goto err;
-
-			ret = regmap_write(wcd->regmap,
-				WCD9335_SLIM_PGD_RX_PORT_CFG(ch->port),
-				WCD9335_SLIM_WATER_MARK_VAL);
-			if (ret < 0)
-				goto err;
-		} else {
-			ret = regmap_write(wcd->regmap,
-				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_0(ch->port),
-				payload & 0xFF);
-			if (ret < 0)
-				goto err;
-
-			ret = regmap_write(wcd->regmap,
-				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_1(ch->port),
-				(payload >> 8) & 0xFF);
-			if (ret < 0)
-				goto err;
-
-			ret = regmap_write(wcd->regmap,
-				WCD9335_SLIM_PGD_TX_PORT_CFG(ch->port),
-				WCD9335_SLIM_WATER_MARK_VAL);
-			if (ret < 0)
-				goto err;
-		}
-	}
 
 	dai_data->sruntime = slim_stream_allocate(wcd->slim, "WCD9335-SLIM");
 
 	return 0;
-
-err:
-	dev_err(wcd->dev, "Error Setting slim hw params\n");
-	kfree(cfg->chs);
-	cfg->chs = NULL;
-
-	return ret;
 }
 
 static int wcd9335_set_decimator_rate(struct snd_soc_dai *dai, u8 rate_val,
