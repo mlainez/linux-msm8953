@@ -307,7 +307,6 @@ struct wcd9335_codec {
 	struct slim_device *slim;
 	struct slim_device *slim_ifc_dev;
 	struct regmap *regmap;
-	struct regmap *if_regmap;
 	struct regmap_irq_chip_data *irq_data;
 
 	struct wcd9335_slim_ch rx_chs[WCD9335_RX_MAX];
@@ -357,6 +356,26 @@ struct wcd9335_irq {
 	irqreturn_t (*handler)(int irq, void *data);
 	char *name;
 };
+
+/*
+ * Raw IFC device register access — bypasses regmap paging to avoid
+ * corrupting the main regmap's page-register cache (element 0x800).
+ * Two regmaps on the same device sharing a hardware page register but
+ * with independent caching causes the main regmap to skip page writes
+ * when the if_regmap has silently changed the page underneath.
+ * All IFC port registers are on page 0 with offsets < 0x100.
+ */
+static int wcd9335_ifc_read(struct wcd9335_codec *wcd, unsigned short reg,
+			    u8 *val)
+{
+	return slim_read(wcd->slim_ifc_dev, 0x800 + reg, 1, val);
+}
+
+static int wcd9335_ifc_write(struct wcd9335_codec *wcd, unsigned short reg,
+			     u8 val)
+{
+	return slim_write(wcd->slim_ifc_dev, 0x800 + reg, 1, &val);
+}
 
 static const char *const wcd9335_supplies[] = {
 	"vdd-buck", "vdd-buck-sido", "vdd-tx", "vdd-rx", "vdd-io",
@@ -1637,9 +1656,11 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 		return -ENOMEM;
 
 	/*
-	 * Write PGD port registers using main regmap (not if_regmap)
-	 * to avoid paging races. Use ch->port directly (absolute port
-	 * number) and write accumulated payload (all channel bits).
+	 * PGD port registers: route through the IFC device via regmap.
+	 * The ADSP only forwards element access to the IFC device (LA=199),
+	 * not the PGD device (LA=200). MULTI_CHNL registers are on page 1
+	 * (offsets 0x100-0x1FF) and PORT_CFG on page 0 — regmap paging
+	 * handles both correctly now that the page cache conflict is fixed.
 	 */
 	i = 0;
 	list_for_each_entry(ch, slim_ch_list, list) {
@@ -1648,6 +1669,9 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 			ret = regmap_write(wcd->regmap,
 				WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(ch->port),
 				payload);
+			dev_info(wcd->dev, "MULTI_CHNL write via regmap: reg=0x%x val=0x%x ret=%d\n",
+				 WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(ch->port),
+				 payload, ret);
 			if (ret < 0)
 				goto err;
 
@@ -1659,13 +1683,13 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 		} else {
 			ret = regmap_write(wcd->regmap,
 				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_0(ch->port),
-				payload & 0x00FF);
+				payload & 0xFF);
 			if (ret < 0)
 				goto err;
 
 			ret = regmap_write(wcd->regmap,
 				WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_1(ch->port),
-				(payload & 0xFF00) >> 8);
+				(payload >> 8) & 0xFF);
 			if (ret < 0)
 				goto err;
 
@@ -1866,10 +1890,9 @@ static int wcd9335_hw_params(struct snd_pcm_substream *substream,
 	wcd9335_slim_set_hw_params(wcd, &wcd->dai[dai->id], substream->stream);
 
 	/*
-	 * Activate SLIMbus channels HERE (during hw_params) so they're
-	 * ready BEFORE AFE DEVICE_START runs in prepare.
-	 * Downstream activates channels during DAPM power-up which
-	 * happens before AFE start.
+	 * Activate SLIMbus channels HERE (during hw_params) so they exist
+	 * BEFORE AFE DEVICE_START. The ADSP looks for shared channels
+	 * during DEVICE_START to link them to the AFE port.
 	 */
 	{
 		struct wcd_slim_codec_dai_data *dd = &wcd->dai[dai->id];
@@ -1879,11 +1902,11 @@ static int wcd9335_hw_params(struct snd_pcm_substream *substream,
 
 			ret2 = slim_stream_prepare(dd->sruntime, &dd->sconfig);
 			if (ret2)
-				dev_warn(wcd->dev, "hw_params: stream_prepare: %d\n", ret2);
+				dev_warn(wcd->dev, "stream_prepare: %d\n", ret2);
 			else {
 				ret2 = slim_stream_enable(dd->sruntime);
 				if (ret2)
-					dev_warn(wcd->dev, "hw_params: stream_enable: %d\n", ret2);
+					dev_warn(wcd->dev, "stream_enable: %d\n", ret2);
 			}
 		}
 	}
@@ -1911,7 +1934,65 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 			 "trigger START: dai=%d stream=%d ports=0x%lx bps=%d rate=%d\n",
 			 dai->id, substream->stream, cfg->port_mask,
 			 cfg->bps, cfg->rate);
-		/* Stream already prepared/enabled in hw_params (before AFE start) */
+		/* Stream activated in hw_params (before AFE start) */
+		/* Dump critical codec registers — all DAPM should be powered by now */
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+			unsigned int v;
+			int r;
+			u8 pv;
+			/* Codec analog/digital registers via regmap (paged) */
+			struct {
+				unsigned int reg;
+				const char *name;
+			} regs[] = {
+				{ WCD9335_ANA_EAR, "ANA_EAR" },
+				{ WCD9335_ANA_RX_SUPPLIES, "ANA_RX_SUPPLIES" },
+				{ WCD9335_ANA_CLK_TOP, "ANA_CLK_TOP" },
+				{ WCD9335_CDC_CLK_RST_CTRL_MCLK_CONTROL, "CDC_MCLK_CTL" },
+				{ WCD9335_CDC_CLK_RST_CTRL_FS_CNT_CONTROL, "CDC_FS_CNT" },
+				{ WCD9335_CDC_RX0_RX_PATH_CTL, "RX0_PATH_CTL" },
+				{ WCD9335_CDC_RX0_RX_PATH_CFG0, "RX0_PATH_CFG0" },
+				{ WCD9335_CDC_RX0_RX_PATH_MIX_CTL, "RX0_PATH_MIX" },
+				{ WCD9335_CDC_RX0_RX_VOL_CTL, "RX0_VOL" },
+				{ WCD9335_CDC_RX0_RX_PATH_SEC0, "RX0_SEC0" },
+				{ WCD9335_CDC_COMPANDER1_CTL0, "COMP1_CTL0" },
+			};
+			int i;
+			for (i = 0; i < ARRAY_SIZE(regs); i++) {
+				v = 0;
+				r = regmap_read(wcd->regmap, regs[i].reg, &v);
+				dev_info(wcd->dev, "REG[%s]=0x%02x (ret=%d)\n",
+					 regs[i].name, v, r);
+			}
+			/* PORT_CFG via raw IFC reads (flat addressing, no paging) */
+			for (i = 0; i < 4; i++) {
+				unsigned short port = 16 + i; /* RX ports 16-19 */
+				pv = 0;
+				r = wcd9335_ifc_read(wcd,
+					WCD9335_SLIM_PGD_RX_PORT_CFG(port), &pv);
+				dev_info(wcd->dev,
+					 "PORT_CFG[%d]=0x%02x (reg=0x%03x ret=%d)\n",
+					 port, pv,
+					 WCD9335_SLIM_PGD_RX_PORT_CFG(port), r);
+			}
+			/* MULTI_CHNL via regmap for ports 18/19 */
+			for (i = 18; i <= 19; i++) {
+				v = 0;
+				r = regmap_read(wcd->regmap,
+					WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(i), &v);
+				dev_info(wcd->dev,
+					 "MULTI_CHNL[%d]=0x%02x (reg=0x%03x ret=%d)\n",
+					 i, v,
+					 WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(i), r);
+			}
+			/* PORT_INT_EN */
+			pv = 0;
+			wcd9335_ifc_read(wcd, WCD9335_SLIM_PGD_PORT_INT_EN0, &pv);
+			dev_info(wcd->dev, "PORT_INT_EN0=0x%02x\n", pv);
+			pv = 0;
+			wcd9335_ifc_read(wcd, WCD9335_SLIM_PGD_PORT_INT_EN0 + 1, &pv);
+			dev_info(wcd->dev, "PORT_INT_EN1=0x%02x\n", pv);
+		}
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
@@ -2894,7 +2975,7 @@ static void wcd9335_codec_enable_int_port(struct wcd_slim_codec_dai_data *dai,
 {
 	int port_num = 0;
 	unsigned short reg = 0;
-	unsigned int val = 0;
+	u8 val = 0;
 	struct wcd9335_codec *wcd = dev_get_drvdata(component->dev);
 	struct wcd9335_slim_ch *ch;
 
@@ -2907,10 +2988,10 @@ static void wcd9335_codec_enable_int_port(struct wcd_slim_codec_dai_data *dai,
 			reg = WCD9335_SLIM_PGD_PORT_INT_TX_EN0 + (port_num / 8);
 		}
 
-		regmap_read(wcd->if_regmap, reg, &val);
+		if (wcd9335_ifc_read(wcd, reg, &val) < 0)
+			continue;
 		if (!(val & BIT(port_num % 8)))
-			regmap_write(wcd->if_regmap, reg,
-				     val | BIT(port_num % 8));
+			wcd9335_ifc_write(wcd, reg, val | BIT(port_num % 8));
 	}
 }
 
@@ -2924,6 +3005,7 @@ static int wcd9335_codec_enable_slim(struct snd_soc_dapm_widget *w,
 	switch (event) {
 	case SND_SOC_DAPM_POST_PMU:
 		wcd9335_codec_enable_int_port(dai, comp);
+		/* empty — full register dump at trigger START */
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		kfree(dai->sconfig.chs);
@@ -3887,22 +3969,24 @@ static irqreturn_t wcd9335_slimbus_irq(int irq, void *data)
 	struct wcd9335_codec *wcd = data;
 	unsigned long status = 0;
 	int i, j, port_id;
-	unsigned int val, int_val = 0;
+	u8 val, int_val;
 	irqreturn_t ret = IRQ_NONE;
 	bool tx;
 	unsigned short reg = 0;
 
 	for (i = WCD9335_SLIM_PGD_PORT_INT_STATUS_RX_0, j = 0;
 	     i <= WCD9335_SLIM_PGD_PORT_INT_STATUS_TX_1; i++, j++) {
-		regmap_read(wcd->if_regmap, i, &val);
+		val = 0;
+		wcd9335_ifc_read(wcd, i, &val);
 		status |= ((u32)val << (8 * j));
 	}
 
 	for_each_set_bit(j, &status, 32) {
 		tx = (j >= 16);
 		port_id = (tx ? j - 16 : j);
-		regmap_read(wcd->if_regmap,
-			    WCD9335_SLIM_PGD_PORT_INT_RX_SOURCE0 + j, &val);
+		val = 0;
+		wcd9335_ifc_read(wcd, WCD9335_SLIM_PGD_PORT_INT_RX_SOURCE0 + j,
+				 &val);
 		if (val) {
 			if (!tx)
 				reg = WCD9335_SLIM_PGD_PORT_INT_EN0 +
@@ -3910,7 +3994,8 @@ static irqreturn_t wcd9335_slimbus_irq(int irq, void *data)
 			else
 				reg = WCD9335_SLIM_PGD_PORT_INT_TX_EN0 +
 				      (port_id / 8);
-			regmap_read(wcd->if_regmap, reg, &int_val);
+			int_val = 0;
+			wcd9335_ifc_read(wcd, reg, &int_val);
 			/*
 			 * Ignore interrupts for ports for which the
 			 * interrupts are not specifically enabled.
@@ -3939,16 +4024,16 @@ static irqreturn_t wcd9335_slimbus_irq(int irq, void *data)
 			else
 				reg = WCD9335_SLIM_PGD_PORT_INT_TX_EN0 +
 				      (port_id / 8);
-			regmap_read(wcd->if_regmap, reg, &int_val);
+			int_val = 0;
+			wcd9335_ifc_read(wcd, reg, &int_val);
 			if (int_val & (1 << (port_id % 8))) {
 				int_val = int_val ^ (1 << (port_id % 8));
-				regmap_write(wcd->if_regmap, reg, int_val);
+				wcd9335_ifc_write(wcd, reg, int_val);
 			}
 		}
 
-		regmap_write(wcd->if_regmap,
-			     WCD9335_SLIM_PGD_PORT_INT_CLR_RX_0 + (j / 8),
-			     BIT(j % 8));
+		wcd9335_ifc_write(wcd, WCD9335_SLIM_PGD_PORT_INT_CLR_RX_0 +
+				  (j / 8), BIT(j % 8));
 		ret = IRQ_HANDLED;
 	}
 
@@ -3988,8 +4073,8 @@ static int wcd9335_setup_irqs(struct wcd9335_codec *wcd)
 
 	/* enable interrupts on all slave ports */
 	for (i = 0; i < WCD9335_SLIM_NUM_PORT_REG; i++)
-		regmap_write(wcd->if_regmap, WCD9335_SLIM_PGD_PORT_INT_EN0 + i,
-			     0xFF);
+		wcd9335_ifc_write(wcd, WCD9335_SLIM_PGD_PORT_INT_EN0 + i,
+				  0xFF);
 
 	return ret;
 }
@@ -4000,8 +4085,8 @@ static void wcd9335_teardown_irqs(struct wcd9335_codec *wcd)
 
 	/* disable interrupts on all slave ports */
 	for (i = 0; i < WCD9335_SLIM_NUM_PORT_REG; i++)
-		regmap_write(wcd->if_regmap, WCD9335_SLIM_PGD_PORT_INT_EN0 + i,
-			     0x00);
+		wcd9335_ifc_write(wcd, WCD9335_SLIM_PGD_PORT_INT_EN0 + i,
+				  0x00);
 }
 
 static void wcd9335_cdc_sido_ccl_enable(struct wcd9335_codec *wcd,
@@ -4912,28 +4997,6 @@ static const struct regmap_config wcd9335_regmap_config = {
 	.volatile_reg = wcd9335_is_volatile_register,
 };
 
-static const struct regmap_range_cfg wcd9335_ifc_ranges[] = {
-	{
-		.name = "WCD9335-IFC-DEV",
-		.range_min = 0x0,
-		.range_max = WCD9335_MAX_REGISTER,
-		.selector_reg = WCD9335_SEL_REGISTER,
-		.selector_mask = 0xff,
-		.selector_shift = 0,
-		.window_start = 0x800,
-		.window_len = 0x100,
-	},
-};
-
-static const struct regmap_config wcd9335_ifc_regmap_config = {
-	.reg_bits = 16,
-	.val_bits = 8,
-	.can_multi_write = true,
-	.max_register = WCD9335_MAX_REGISTER,
-	.ranges = wcd9335_ifc_ranges,
-	.num_ranges = ARRAY_SIZE(wcd9335_ifc_ranges),
-};
-
 static const struct regmap_irq wcd9335_codec_irqs[] = {
 	/* INTR_REG 0 */
 	[WCD9335_IRQ_SLIMBUS] = {
@@ -5088,38 +5151,11 @@ static int wcd9335_bring_up(struct wcd9335_codec *wcd)
 		regmap_write(rm, WCD9335_CODEC_RPM_PWR_CDC_DIG_HM_CTL, 0x3);
 		regmap_write(rm, WCD9335_CODEC_RPM_RST_CTL, 0x3);
 
-		/* Test: read multiple registers via IFC (no cache) */
-		usleep_range(1000, 1100);
-		{
-			int v0 = -1, v1 = -1, v2 = -1, v3 = -1;
-
-			/* Read various registers via IFC (REGCACHE_NONE) */
-			if (wcd->if_regmap) {
-				regmap_read(wcd->if_regmap, 0x0000, &v0);
-				regmap_read(wcd->if_regmap, 0x0001, &v1);
-				regmap_read(wcd->if_regmap, 0x0009, &v2);
-				regmap_read(wcd->if_regmap, 0x0800, &v3);
-			}
-			dev_info(wcd->dev,
-				 "WCD9335 IFC reads: [0]=0x%x [1]=0x%x [9]=0x%x [800]=0x%x\n",
-				 v0, v1, v2, v3);
-		}
 		ret = regmap_read(rm, WCD9335_CHIP_TIER_CTRL_CHIP_ID_BYTE0,
 				  &val);
 		dev_info(wcd->dev,
-			 "WCD9335 post-init: main regmap chip_id ret=%d val=0x%x\n",
+			 "WCD9335 post-init: chip_id ret=%d val=0x%x\n",
 			 ret, ret ? -1 : val);
-
-		/* Also try via IFC regmap */
-		if (wcd->if_regmap) {
-			int ival = -1;
-			int iret = regmap_read(wcd->if_regmap,
-					       WCD9335_CHIP_TIER_CTRL_CHIP_ID_BYTE0,
-					       &ival);
-			dev_info(wcd->dev,
-				 "WCD9335 post-init: IFC regmap chip_id ret=%d val=0x%x\n",
-				 iret, iret ? -1 : ival);
-		}
 	} else {
 		dev_err(wcd->dev,
 			"WCD9335 CODEC version not supported (id=0x%x)\n",
@@ -5241,22 +5277,16 @@ static int wcd9335_slim_status(struct slim_device *sdev,
 	}
 
 	/*
-	 * Route register I/O through the IFC device (LA=192).
-	 * Downstream wcd9xxx uses slim_slave (IFC) for ALL element
-	 * access. The ADSP may only forward writes addressed to the
-	 * IFC device, not the main codec device (LA=193).
+	 * Route codec register I/O through the IFC device.
+	 * IFC port registers (PORT_INT_EN, etc.) are accessed via raw
+	 * slim_read/slim_write in wcd9335_ifc_read/write() to avoid
+	 * a second regmap clobbering this regmap's page-register cache.
 	 */
 	wcd->regmap = regmap_init_slimbus(wcd->slim_ifc_dev,
 					  &wcd9335_regmap_config);
 	if (IS_ERR(wcd->regmap))
 		return dev_err_probe(dev, PTR_ERR(wcd->regmap),
 				     "Failed to allocate slim register map\n");
-
-	wcd->if_regmap = regmap_init_slimbus(wcd->slim_ifc_dev,
-					     &wcd9335_ifc_regmap_config);
-	if (IS_ERR(wcd->if_regmap))
-		return dev_err_probe(dev, PTR_ERR(wcd->if_regmap),
-				     "Failed to allocate ifc register map\n");
 
 	ret = wcd9335_bring_up(wcd);
 	if (ret) {

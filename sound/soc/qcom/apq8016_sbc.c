@@ -323,27 +323,32 @@ static int msm8916_qdsp6_hw_params(struct snd_pcm_substream *substream,
 		ret = snd_soc_dai_set_channel_map(cpu_dai,
 						  tx_num, tx_ch, 0, NULL);
 	} else if (cpu_dai->id == SLIMBUS_0_RX) {
-		/* Get RX channels dynamically from codec */
+		/*
+		 * Get RX channel map from the codec — reflects which
+		 * SLIM RX ports the user enabled via the mux (e.g.
+		 * "SLIM RX0 MUX" = "AIF_MIX1_PB" → ch 146/147).
+		 */
 		struct snd_soc_dai *codec_dai;
-		unsigned int rx_ch[8] = {};
+		unsigned int rx_ch[8] = { 144, 145 };
 		unsigned int rx_num = 0;
+		int nch = params_channels(params);
 
 		codec_dai = snd_soc_rtd_to_codec(rtd, 0);
 		ret = snd_soc_dai_get_channel_map(codec_dai,
 						  NULL, NULL, &rx_num, rx_ch);
 		if (ret || rx_num == 0) {
+			/* Fallback: RX0/RX1 (ch 144/145) */
 			rx_ch[0] = 144;
 			rx_ch[1] = 145;
-			rx_num = 2;
+			rx_num = nch;
 		}
 
 		dev_info(rtd->card->dev,
-			 "SLIM RX ch_map: rx_num=%d rx_ch=[%d,%d]\n",
-			 rx_num, rx_ch[0], rx_ch[1]);
+			 "SLIM RX ch_map: nch=%d rx_num=%d rx_ch=[%d,%d]\n",
+			 nch, rx_num, rx_ch[0], rx_ch[1]);
 
 		ret = snd_soc_dai_set_channel_map(cpu_dai, 0, NULL,
-						  params_channels(params),
-						  rx_ch);
+						  rx_num, rx_ch);
 	}
 	return ret;
 }

@@ -1187,12 +1187,33 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 
 		if (txn.msg->num_bytes == 0) {
 			/*
-			 * First byte: (dataf << 5) | (laddr & 0x1f)
-			 * From downstream ngd_allocbw line 1080.
-			 * dataf=1 (LPCM_AUDIO) for PCM audio.
+			 * DEF_ACT_CHAN USR message format (Qualcomm encoding):
+			 * Byte 0: (dataf << 5) | (laddr & 0x1f)
+			 * Byte 1: (sampleszbits >> 2) | (CL << 5) | (auxf << 6)
+			 * Byte 2: (rootexp << 4) | protocol
+			 * Byte 3: prrate (Qualcomm: base_rate_code + (seglen-1)*8)
+			 * Byte 4: TID
+			 * Byte 5+: channel IDs
+			 *
+			 * dataf=0 (NOT_DEFINED) matches downstream tasha.
+			 * prrate uses Qualcomm encoding, NOT SLIMbus standard.
 			 */
-			wbuf[txn.msg->num_bytes++] =
-				(1 << 5) | (sdev->laddr & 0x1f);
+			int seglen = (rt->bps + 7) / 8; /* bytes per sample */
+			int base_rate_code;
+			int qcom_prrate;
+
+			/* Qualcomm base rate codes (from downstream slim_ch_rate) */
+			if (rt->rate % 11025 == 0) {
+				base_rate_code = 2; /* 11025Hz family */
+			} else {
+				base_rate_code = 1; /* 4000Hz family */
+			}
+			qcom_prrate = base_rate_code + (seglen - 1) * 8;
+
+			/* Byte 0: dataf=0 (NOT_DEFINED) + laddr low 5 bits */
+			wbuf[txn.msg->num_bytes++] = sdev->laddr & 0x1f;
+
+			/* Byte 1: sampleszbits + coef + auxf */
 			wbuf[txn.msg->num_bytes] = rt->bps >> 2 |
 						   (port->ch.aux_fmt << 6);
 
@@ -1207,14 +1228,12 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 				wbuf[txn.msg->num_bytes] |= BIT(5);
 
 			txn.msg->num_bytes++;
+
+			/* Byte 2: rootexp + protocol */
 			wbuf[txn.msg->num_bytes++] = exp << 4 | rt->prot;
 
-			if (rt->prot == SLIM_PROTO_ISO)
-				wbuf[txn.msg->num_bytes++] =
-					port->ch.prrate |
-					SLIM_CHANNEL_CONTENT_FL;
-			else
-				wbuf[txn.msg->num_bytes++] = port->ch.prrate;
+			/* Byte 3: Qualcomm prrate (no FL flag) */
+			wbuf[txn.msg->num_bytes++] = qcom_prrate;
 
 			ret = slim_alloc_txn_tid(ctrl, &txn);
 			if (ret) {
@@ -1222,6 +1241,11 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 				return -ENXIO;
 			}
 			wbuf[txn.msg->num_bytes++] = txn.tid;
+
+			dev_info(ctrl->dev,
+				 "DEF_ACT_CHAN bytes: [%02x %02x %02x %02x TID=%d] coef=%d exp=%d seglen=%d\n",
+				 wbuf[0], wbuf[1], wbuf[2], wbuf[3],
+				 txn.tid, coef, exp, seglen);
 		}
 		wbuf[txn.msg->num_bytes++] = port->ch.id;
 	}
@@ -1264,30 +1288,13 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 	}
 
 	/*
-	 * Enable PGD data ports. Without this, the SLIMbus data channels
-	 * are connected (CONNECT ACKed) but no audio data flows.
-	 * The PGD port enable writes directly to hardware registers,
-	 * bypassing the ADSP proxy.
+	 * No BAM pipe arming or PGD port enable needed here.
+	 * Downstream's msm_slim_connect_pipe_port() is only called when
+	 * wbuf[0] == pgdla (0xFF), which is FALSE for codec audio CONNECTs
+	 * (codec LA=200). The ADSP manages audio data pipes autonomously
+	 * through its own BAM pipes (EE0, pipes 3-19).
+	 * apps_pipes=0x600000 (pipes 21/22) are for non-audio uses (MAD).
 	 */
-	/*
-	 * Enable PGD data ports from apps_pipes bitmask.
-	 * apps_pipes=0x600000 → bits 21,22 → PGD ports 14,15 (pipe - 7).
-	 */
-	{
-		int pipe, n = 0;
-
-		for (pipe = 7; pipe < 32 && n < rt->num_ports; pipe++) {
-			if ((dev->apps_pipes >> pipe) & 1) {
-				int pgd_port = pipe - 7;
-
-				dev_info(ctrl->dev,
-					 "Enabling PGD port %d (pipe %d) for stream\n",
-					 pgd_port, pipe);
-				msm8953_slim_enable_pgd_port(dev, pgd_port, n);
-				n++;
-			}
-		}
-	}
 
 	return 0;
 }
@@ -1458,8 +1465,21 @@ static int msm8953_slim_power_up(struct msm8953_slim_ctrl *dev)
 		u32 stat = readl_relaxed(ngd + NGD_STATUS);
 
 		dev_info(dev->dev,
-			 "MCAP timeout (expected on MSM8953), proceeding. stat=0x%x cfg=0x%x\n",
+			 "MCAP timeout, proceeding. stat=0x%x cfg=0x%x\n",
 			 stat, cfg);
+
+		/*
+		 * Send REPORT_SATELLITE even without MCAP. The ADSP needs
+		 * this to set up audio data routing through SLIMbus.
+		 * Without it, CONNECT/DEF_ACT_CHAN are ACKed at the bus
+		 * manager level but the ADSP audio path doesn't link to
+		 * the SLIMbus data channels.
+		 */
+		ret = msm8953_slim_report_satellite(dev);
+		if (ret)
+			dev_warn(dev->dev, "REPORT_SAT (no MCAP): %d\n", ret);
+		else
+			dev_info(dev->dev, "REPORT_SAT sent OK (no MCAP)\n");
 	}
 
 	/* Mark SLIMbus clock active for framework */
