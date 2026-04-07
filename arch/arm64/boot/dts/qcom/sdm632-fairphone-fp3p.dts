@@ -140,6 +140,14 @@
 	status = "okay";
 };
 
+/* Audio ION: IOMMU context for sharing cal memory with ADSP */
+&{/soc@0} {
+	msm_audio_ion: msm-audio-ion {
+		compatible = "qcom,msm-audio-ion";
+		iommus = <&apps_iommu 0x0f>;
+	};
+};
+
 &slim_msm {
 	status = "okay";
 

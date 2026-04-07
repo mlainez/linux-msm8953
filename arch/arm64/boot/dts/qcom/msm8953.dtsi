@@ -2080,6 +2080,13 @@
 			#iommu-cells = <1>;
 			#size-cells = <1>;
 
+			/* Audio ION (SID 0x2401 → CB 15) */
+			iommu-ctx@f000 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0xf000 0x1000>;
+				interrupts = <GIC_SPI 104 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
 			/* VFE */
 			iommu-ctx@14000 {
 				compatible = "qcom,msm-iommu-v1-ns";

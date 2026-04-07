@@ -477,7 +477,8 @@ static long ion_shim_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 		alloc.handle = entry->handle;
 		if (copy_to_user((void __user *)arg, &alloc, sizeof(alloc))) {
-			dma_free_coherent(ion_dev, entry->size, entry->vaddr, entry->paddr);
+			dma_free_coherent(ion_cma_dev ? ion_cma_dev : ion_dev,
+					  entry->size, entry->vaddr, entry->paddr);
 			kfree(entry);
 			return -EFAULT;
 		}
@@ -562,11 +563,18 @@ static int ion_shim_mmap(struct file *f, struct vm_area_struct *vma)
 		if (entry->handle == target_handle) {
 			int ret;
 
-			vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-			ret = remap_pfn_range(vma, vma->vm_start,
-					      entry->paddr >> PAGE_SHIFT,
-					      min(size, entry->size),
-					      vma->vm_page_prot);
+			if (entry->use_cma && ion_cma_dev) {
+				ret = dma_mmap_coherent(ion_cma_dev, vma,
+							entry->vaddr,
+							entry->paddr,
+							entry->size);
+			} else {
+				vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+				ret = remap_pfn_range(vma, vma->vm_start,
+						      entry->paddr >> PAGE_SHIFT,
+						      min(size, entry->size),
+						      vma->vm_page_prot);
+			}
 			mutex_unlock(&ion_lock);
 			pr_info("ion_shim: mmap handle=%d size=%zu phys=%pad\n",
 				target_handle, entry->size, &entry->paddr);
@@ -637,6 +645,38 @@ int msm_audio_cal_get_cal(int cal_type, void **buf, size_t *size,
 }
 EXPORT_SYMBOL_GPL(msm_audio_cal_get_cal);
 
+/*
+ * msm-audio-ion platform driver: binds to the DTS node with
+ * iommus = <&apps_iommu 0x0f> so dma_alloc_coherent on this device
+ * returns SMMU-translated IOVAs accessible by the ADSP.
+ */
+static int msm_audio_ion_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+
+	/* 32-bit mask keeps IOVAs in lower 32 bits, leaving upper
+	 * 32 bits free for SID encoding when sending to ADSP.
+	 */
+	dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+
+	ion_cma_dev = dev;
+	pr_info("msm_audio_cal: audio-ion IOMMU device ready\n");
+	return 0;
+}
+
+static const struct of_device_id msm_audio_ion_of_match[] = {
+	{ .compatible = "qcom,msm-audio-ion" },
+	{}
+};
+
+static struct platform_driver msm_audio_ion_driver = {
+	.probe = msm_audio_ion_probe,
+	.driver = {
+		.name = "msm-audio-ion",
+		.of_match_table = msm_audio_ion_of_match,
+	},
+};
+
 static int __init msm_audio_cal_init(void)
 {
 	int ret;
@@ -656,55 +696,14 @@ static int __init msm_audio_cal_init(void)
 		pr_info("msm_audio_cal: /dev/ion shim registered\n");
 
 	/*
-	 * Attach the ADSP CMA region to our misc device so that
-	 * dma_alloc_coherent gives ADSP-accessible memory.
-	 * Find the "adsp-region" node in reserved-memory and init CMA.
+	 * The msm-audio-ion platform driver (below) sets ion_cma_dev when
+	 * it probes. That device has iommus = <&apps_iommu 0x0f> so
+	 * dma_alloc_coherent returns IOVAs that the ADSP can access via SMMU.
+	 * Register the platform driver here.
 	 */
-	/*
-	 * Find the ADSP shared memory region (adsp_mem) and attach it
-	 * to our misc device for DMA allocations. MSM8953 uses MPU
-	 * (not SMMU) so the ADSP can access CMA memory directly.
-	 */
-	{
-		struct device *dev = msm_audio_cal_misc.this_device;
-		struct device_node *np;
-
-		/* Find a DT node with memory-region pointing to adsp CMA.
-		 * The fastrpc node has memory-region = <&adsp_mem>.
-		 */
-		np = of_find_compatible_node(NULL, NULL, "qcom,fastrpc");
-		if (np) {
-			struct device_node *rmem_np;
-
-			rmem_np = of_parse_phandle(np, "memory-region", 0);
-			if (rmem_np) {
-				struct reserved_mem *rmem;
-
-				rmem = of_reserved_mem_lookup(rmem_np);
-				if (rmem && rmem->size > 0) {
-					pr_info("msm_audio_cal: found ADSP CMA: %s base=0x%llx size=0x%llx\n",
-						rmem->name, (u64)rmem->base, (u64)rmem->size);
-
-					/* Attach CMA to our device properly */
-					dma_set_mask_and_coherent(dev, DMA_BIT_MASK(36));
-					if (rmem->ops && rmem->ops->device_init) {
-						if (!rmem->ops->device_init(rmem, dev)) {
-							ion_cma_dev = dev;
-							pr_info("msm_audio_cal: ADSP CMA attached to device\n");
-						} else {
-							pr_warn("msm_audio_cal: CMA device_init failed\n");
-						}
-					} else {
-						pr_warn("msm_audio_cal: CMA region has no ops\n");
-					}
-				}
-				of_node_put(rmem_np);
-			}
-			of_node_put(np);
-		} else {
-			pr_warn("msm_audio_cal: no fastrpc node found\n");
-		}
-	}
+	ret = platform_driver_register(&msm_audio_ion_driver);
+	if (ret)
+		pr_warn("msm_audio_cal: failed to register audio-ion driver: %d\n", ret);
 
 	return 0;
 }
@@ -722,6 +721,7 @@ static void __exit msm_audio_cal_exit(void)
 	mutex_unlock(&cal_lock);
 
 	misc_deregister(&msm_audio_cal_misc);
+	platform_driver_unregister(&msm_audio_ion_driver);
 }
 
 module_init(msm_audio_cal_init);

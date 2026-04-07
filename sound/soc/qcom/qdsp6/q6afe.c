@@ -35,6 +35,10 @@
 #define AFE_MODULE_TDM			0x0001028A
 
 #define AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG 0x00010235
+#define AFE_MODULE_CDC_DEV_CFG		0x00010234
+#define AFE_PARAM_ID_CDC_REG_CFG	0x00010236
+#define AFE_PARAM_ID_CDC_REG_CFG_INIT	0x00010237
+#define AFE_PARAM_ID_CDC_REG_PAGE_CFG	0x00010296
 #define AFE_PARAM_ID_USB_AUDIO_DEV_PARAMS    0x000102A5
 #define AFE_PARAM_ID_USB_AUDIO_DEV_LPCM_FMT 0x000102AA
 
@@ -1343,6 +1347,10 @@ void q6afe_slim_port_prepare(struct q6afe_port *port,
 	pcfg->slim_cfg.shared_ch_mapping[2] = cfg->ch_mapping[2];
 	pcfg->slim_cfg.shared_ch_mapping[3] = cfg->ch_mapping[3];
 
+	pr_info("q6afe: SLIM port 0x%x cfg: rate=%d bw=%d nch=%d ch=[%d,%d,%d,%d]\n",
+		port->id, cfg->sample_rate, cfg->bit_width, cfg->num_channels,
+		cfg->ch_mapping[0], cfg->ch_mapping[1],
+		cfg->ch_mapping[2], cfg->ch_mapping[3]);
 }
 EXPORT_SYMBOL_GPL(q6afe_slim_port_prepare);
 
@@ -1668,6 +1676,113 @@ EXPORT_SYMBOL_GPL(q6afe_cdc_dma_port_prepare);
  *
  * Return: Will be an negative on packet size on success.
  */
+/*
+ * Send WCD9335 CDC register configuration to ADSP.
+ * This tells the ADSP where PGD port registers are (watermark, enable)
+ * so it can enable SLIMbus data flow during AFE_DEVICE_START.
+ * Must be sent once before the first SLIMbus port start.
+ */
+static void q6afe_send_cdc_config(struct q6afe *afe)
+{
+	static bool cdc_config_sent;
+	int i, ret;
+
+	if (cdc_config_sent)
+		return;
+	cdc_config_sent = true;
+
+	/* CDC_REG_CFG entries — PGD port register info for ADSP.
+	 * Field types 33-36 per downstream wcd9xxx-common-v2.h.
+	 * Register addresses: TX base=0x850, RX base=0x840.
+	 */
+	struct {
+		u32 minor_version;
+		u32 reg_logical_addr;
+		u32 reg_field_type;
+		u32 reg_field_bit_mask;
+		u16 reg_bit_width;
+		u16 reg_offset_scale;
+	} __packed cdc_regs[] = {
+		{ 1, 0x850, 33, 0x1E, 8, 1 }, /* SB_PGD_PORT_TX_WATERMARK_N */
+		{ 1, 0x850, 34, 0x01, 8, 1 }, /* SB_PGD_PORT_TX_ENABLE_N */
+		{ 1, 0x840, 35, 0x1E, 8, 1 }, /* SB_PGD_PORT_RX_WATERMARK_N */
+		{ 1, 0x840, 36, 0x01, 8, 1 }, /* SB_PGD_PORT_RX_ENABLE_N */
+	};
+
+	for (i = 0; i < ARRAY_SIZE(cdc_regs); i++) {
+		ret = q6afe_set_param(afe, NULL, &cdc_regs[i],
+				      AFE_PARAM_ID_CDC_REG_CFG,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      sizeof(cdc_regs[i]),
+				      AFE_CLK_TOKEN);
+		if (ret)
+			dev_warn(afe->dev, "CDC_REG_CFG[%d] type=%d: %d\n",
+				 i, cdc_regs[i].reg_field_type, ret);
+		else
+			dev_info(afe->dev, "CDC_REG_CFG[%d] type=%d: OK\n",
+				 i, cdc_regs[i].reg_field_type);
+	}
+
+	/* CDC_REG_PAGE_CFG: enable register paging, proc_id=1 */
+	{
+		struct {
+			u32 minor_version;
+			u32 enable;
+			u32 proc_id;
+		} __packed page_cfg = { 1, 1, 1 };
+
+		ret = q6afe_set_param(afe, NULL, &page_cfg,
+				      AFE_PARAM_ID_CDC_REG_PAGE_CFG,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      sizeof(page_cfg), AFE_CLK_TOKEN);
+		if (ret)
+			dev_warn(afe->dev, "CDC_REG_PAGE_CFG: %d\n", ret);
+	}
+
+	/* CDC_SLIMBUS_SLAVE_CFG: codec EA + port offsets.
+	 * Previously failed with EINVAL because minor_version was missing.
+	 */
+	{
+		struct {
+			u32 minor_version;
+			u32 device_enum_addr_lsw;
+			u32 device_enum_addr_msw;
+			u16 tx_slave_port_offset;
+			u16 rx_slave_port_offset;
+		} __packed slave_cfg = {
+			.minor_version = 1,
+			/* WCD9335 PGD EA: manf=0x0217 prod=0x01a0 dev_idx=1 inst=0 */
+			.device_enum_addr_lsw = 0x01a00100,
+			.device_enum_addr_msw = 0x00000217,
+			.tx_slave_port_offset = 0,
+			.rx_slave_port_offset = 16,
+		};
+
+		ret = q6afe_set_param(afe, NULL, &slave_cfg,
+				      AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      sizeof(slave_cfg), AFE_CLK_TOKEN);
+		if (ret)
+			dev_warn(afe->dev, "CDC_SLIMBUS_SLAVE_CFG: %d\n", ret);
+		else
+			dev_info(afe->dev, "CDC_SLIMBUS_SLAVE_CFG: OK\n");
+	}
+
+	/* CDC_REG_CFG_INIT: finalize configuration */
+	{
+		u32 init = 1;
+
+		ret = q6afe_set_param(afe, NULL, &init,
+				      AFE_PARAM_ID_CDC_REG_CFG_INIT,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      sizeof(init), AFE_CLK_TOKEN);
+		if (ret)
+			dev_warn(afe->dev, "CDC_REG_CFG_INIT: %d\n", ret);
+	}
+
+	dev_info(afe->dev, "CDC config sent to ADSP\n");
+}
+
 int q6afe_port_start(struct q6afe_port *port)
 {
 	struct afe_port_cmd_device_start *start;
@@ -1678,19 +1793,29 @@ int q6afe_port_start(struct q6afe_port *port)
 	int pkt_size;
 	void *p __free(kfree) = NULL;
 
+	/* Send CDC config before first SLIMbus port start */
+	if (port_id == 0x4000 || port_id == 0x4001)
+		q6afe_send_cdc_config(afe);
+
 	/*
-	 * Send ACDB calibration to ADSP via shared memory for SLIMbus ports.
-	 * The acdb_loader stores cal data in ION buffers via msm_audio_cal.
-	 * We forward it to the ADSP using AFE_PORT_CMD_SET_PARAM_V2 with
-	 * the physical address and a shared memory map handle.
+	 * ACDB calibration forwarding (disabled — downstream doesn't use
+	 * kernel cal for earpiece, and it causes ADSP crash without proper
+	 * SMMU page table verification).
 	 */
-	if (port_id == 0x4000 || port_id == 0x4001) {
+	if (0 && (port_id == 0x4000 || port_id == 0x4001)) {
 		extern int msm_audio_cal_get_cal(int, void **, size_t *, dma_addr_t *);
 		void *cal_buf;
 		size_t cal_sz;
 		dma_addr_t cal_phys;
 		/* cal_type 15 = AFE cal, 17 = AFE common */
 		int cal_type = (port_id & 1) ? 17 : 15;
+		/*
+		 * ADSP accesses shared memory through the APPS SMMU.
+		 * The SID (stream ID) embedded in bits [63:32] tells
+		 * the ADSP which SMMU context to use for the access.
+		 * Downstream: smmu_sid = 0x2401 & 0xf = 1.
+		 */
+		const u64 smmu_sid_bits = (u64)1 << 32;
 
 		if (msm_audio_cal_get_cal(cal_type, &cal_buf, &cal_sz, &cal_phys) == 0
 		    && cal_phys && cal_sz > 0) {
@@ -1714,7 +1839,7 @@ int q6afe_port_start(struct q6afe_port *port)
 				cmd.mem_pool_id = 3;
 				cmd.num_regions = 1;
 				cmd.shm_addr_lsw = lower_32_bits(cal_phys);
-				cmd.shm_addr_msw = upper_32_bits(cal_phys);
+				cmd.shm_addr_msw = upper_32_bits((u64)cal_phys | smmu_sid_bits);
 				cmd.mem_size_bytes = PAGE_ALIGN(cal_sz);
 
 				afe->mmap_handle = 0;
@@ -1741,7 +1866,7 @@ int q6afe_port_start(struct q6afe_port *port)
 					param->port_id = port_id;
 					param->payload_size = cal_sz;
 					param->payload_address_lsw = lower_32_bits(cal_phys);
-					param->payload_address_msw = upper_32_bits(cal_phys);
+					param->payload_address_msw = upper_32_bits((u64)cal_phys | smmu_sid_bits);
 					param->mem_map_handle = afe->mmap_handle;
 
 					ret = afe_apr_send_pkt(afe, cpkt, port,
