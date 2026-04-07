@@ -3037,6 +3037,13 @@
 				};
 			};
 
+			mm5-dai-link {
+				link-name = "MultiMedia5";
+				cpu {
+					sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA5>;
+				};
+			};
+
 			voicemmode1-dai-link {
 				link-name = "VoiceMMode1";
 				cpu {
@@ -3229,6 +3236,10 @@
 								reg = <MSM_FRONTEND_DAI_MULTIMEDIA4>;
 								direction = <Q6ASM_DAI_RX>;
 								is-compress-dai;
+							};
+							dai@4 {
+								reg = <MSM_FRONTEND_DAI_MULTIMEDIA5>;
+								direction = <Q6ASM_DAI_RX>;
 							};
 						};
 					};
