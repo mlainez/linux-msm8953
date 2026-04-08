@@ -1692,11 +1692,11 @@ static void q6afe_send_cdc_config(struct q6afe *afe)
 	cdc_config_sent = true;
 
 	/*
-	 * CDC_REG_CFG entries — all 22 from downstream tasha audio_reg_cfg[].
-	 * Format: { ver, element_addr, field_type, mask, width, scale }
-	 * Element addr = TASHA_REGISTER_START_OFFSET(0x800) + reg.
-	 * Field types from wcd9xxx-common-v2.h enum (1-based).
-	 * Source: fp3-lineage/techpack/audio/asoc/codecs/wcd9335.c:225-334
+	 * CDC_REG_CFG entries — SLIMbus port watermark/enable ONLY.
+	 * The downstream sends 22 entries (MAD, VBAT, AANC + ports)
+	 * but the extra entries cause the ADSP to write unexpected
+	 * values to per-port PORT_CFG registers. Keep only the 4
+	 * essential port entries to match downstream ADSP behavior.
 	 */
 	struct {
 		u32 minor_version;
@@ -1706,34 +1706,10 @@ static void q6afe_send_cdc_config(struct q6afe *afe)
 		u16 reg_bit_width;
 		u16 reg_offset_scale;
 	} __packed cdc_regs[] = {
-		/* MAD (Microphone Activity Detection) */
-		{ 1, 0x800 + 0x0281,  4, 0x01, 8, 0 }, /* HW_MAD_AUDIO_ENABLE */
-		{ 1, 0x800 + 0x0285,  7, 0x0F, 8, 0 }, /* HW_MAD_AUDIO_SLEEP_TIME */
-		{ 1, 0x800 + 0x0286, 10, 0x01, 8, 0 }, /* HW_MAD_TX_AUDIO_SWITCH_OFF */
-		/* MAD interrupt routing */
-		{ 1, 0x800 + 0x0081, 13, 0x02, 8, 0 }, /* MAD_AUDIO_INT_DEST_SELECT_REG */
-		{ 1, 0x800 + 0x00a4, 18, 0x01, 8, 0 }, /* MAD_AUDIO_INT_MASK_REG */
-		{ 1, 0x800 + 0x00ac, 23, 0x01, 8, 0 }, /* MAD_AUDIO_INT_STATUS_REG */
-		{ 1, 0x800 + 0x00b4, 28, 0x01, 8, 0 }, /* MAD_AUDIO_INT_CLEAR_REG */
-		/* VBAT interrupt routing */
-		{ 1, 0x800 + 0x0081, 17, 0x02, 8, 0 }, /* VBAT_INT_DEST_SELECT_REG */
-		{ 1, 0x800 + 0x00a4, 22, 0x08, 8, 0 }, /* VBAT_INT_MASK_REG */
-		{ 1, 0x800 + 0x00ac, 27, 0x08, 8, 0 }, /* VBAT_INT_STATUS_REG */
-		{ 1, 0x800 + 0x00b4, 32, 0x08, 8, 0 }, /* VBAT_INT_CLEAR_REG */
-		/* VBAT release interrupt */
-		{ 1, 0x800 + 0x0081, 53, 0x02, 8, 0 }, /* VBAT_RELEASE_INT_DEST_SELECT */
-		{ 1, 0x800 + 0x00a4, 54, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_MASK_REG */
-		{ 1, 0x800 + 0x00ac, 55, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_STATUS_REG */
-		{ 1, 0x800 + 0x00b4, 56, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_CLEAR_REG */
-		/* SLIMbus PGD port config (TX + RX) */
 		{ 1, 0x850, 33, 0x1E, 8, 1 }, /* SB_PGD_PORT_TX_WATERMARK_N */
 		{ 1, 0x850, 34, 0x01, 8, 1 }, /* SB_PGD_PORT_TX_ENABLE_N */
 		{ 1, 0x840, 35, 0x1E, 8, 1 }, /* SB_PGD_PORT_RX_WATERMARK_N */
 		{ 1, 0x840, 36, 0x01, 8, 1 }, /* SB_PGD_PORT_RX_ENABLE_N */
-		/* AANC (Active ANC) */
-		{ 1, 0x800 + 0x0a0b, 41, 0x04, 8, 0 }, /* AANC_FF_GAIN_ADAPTIVE */
-		{ 1, 0x800 + 0x0a0b, 42, 0x08, 8, 0 }, /* AANC_FFGAIN_ADAPTIVE_EN */
-		{ 1, 0x800 + 0x0a0e, 43, 0xFF, 8, 0 }, /* AANC_GAIN_CONTROL */
 	};
 
 	for (i = 0; i < ARRAY_SIZE(cdc_regs); i++) {
@@ -1850,16 +1826,7 @@ static void q6afe_send_cdc_config(struct q6afe *afe)
 #define AFE_MODULE_HW_MAD		0x00010230
 #define AFE_PARAM_ID_SLIMBUS_SLAVE_PORT_CFG 0x00010233
 
-		ret = q6afe_set_param(afe, NULL, &slave_port_cfg,
-				      AFE_PARAM_ID_SLIMBUS_SLAVE_PORT_CFG,
-				      AFE_MODULE_HW_MAD,
-				      sizeof(slave_port_cfg), AFE_CLK_TOKEN);
-		if (ret)
-			dev_warn(afe->dev, "SLIMBUS_SLAVE_PORT_CFG: %d\n", ret);
-		else
-			dev_info(afe->dev, "SLIMBUS_SLAVE_PORT_CFG: OK (pgd_la=%d ifc_la=%d)\n",
-				 slave_port_cfg.slave_dev_pgd_la,
-				 slave_port_cfg.slave_dev_intfdev_la);
+		/* SLAVE_PORT_CFG disabled — didn't help, may confuse ADSP */
 	}
 
 	dev_info(afe->dev, "CDC config sent to ADSP\n");
@@ -1983,41 +1950,13 @@ int q6afe_port_start(struct q6afe_port *port)
 	}
 
 	/*
-	 * Send only the correct struct size for this port type, not the
-	 * full union. The ADSP validates param_size against the expected
-	 * struct size for the given param_id.
+	 * Send full union size, matching downstream behavior.
+	 * Downstream: config.pdata.param_size = sizeof(config.port)
+	 * where config.port is union afe_port_config.
 	 */
-	{
-		size_t cfg_size;
-
-		switch (param_id) {
-		case AFE_PARAM_ID_SLIMBUS_CONFIG:
-			cfg_size = sizeof(port->port_cfg.slim_cfg);
-			break;
-		case AFE_PARAM_ID_HDMI_CONFIG:
-			cfg_size = sizeof(port->port_cfg.hdmi_multi_ch);
-			break;
-		case AFE_PARAM_ID_I2S_CONFIG:
-			cfg_size = sizeof(port->port_cfg.i2s_cfg);
-			break;
-		case AFE_PARAM_ID_TDM_CONFIG:
-			cfg_size = sizeof(port->port_cfg.tdm_cfg);
-			break;
-		case AFE_PARAM_ID_CODEC_DMA_CONFIG:
-			cfg_size = sizeof(port->port_cfg.dma_cfg);
-			break;
-		case AFE_PARAM_ID_USB_AUDIO_CONFIG:
-			cfg_size = sizeof(port->port_cfg.usb_cfg);
-			break;
-		default:
-			cfg_size = sizeof(port->port_cfg);
-			break;
-		}
-
-		ret = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
-					       AFE_MODULE_AUDIO_DEV_INTERFACE,
-					       cfg_size);
-	}
+	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
+				       AFE_MODULE_AUDIO_DEV_INTERFACE,
+				       sizeof(port->port_cfg));
 	if (ret) {
 		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\n",
 			port_id, ret);
