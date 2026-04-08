@@ -1691,9 +1691,12 @@ static void q6afe_send_cdc_config(struct q6afe *afe)
 		return;
 	cdc_config_sent = true;
 
-	/* CDC_REG_CFG entries — PGD port register info for ADSP.
-	 * Field types 33-36 per downstream wcd9xxx-common-v2.h.
-	 * Register addresses: TX base=0x850, RX base=0x840.
+	/*
+	 * CDC_REG_CFG entries — all 22 from downstream tasha audio_reg_cfg[].
+	 * Format: { ver, element_addr, field_type, mask, width, scale }
+	 * Element addr = TASHA_REGISTER_START_OFFSET(0x800) + reg.
+	 * Field types from wcd9xxx-common-v2.h enum (1-based).
+	 * Source: fp3-lineage/techpack/audio/asoc/codecs/wcd9335.c:225-334
 	 */
 	struct {
 		u32 minor_version;
@@ -1703,10 +1706,34 @@ static void q6afe_send_cdc_config(struct q6afe *afe)
 		u16 reg_bit_width;
 		u16 reg_offset_scale;
 	} __packed cdc_regs[] = {
+		/* MAD (Microphone Activity Detection) */
+		{ 1, 0x800 + 0x0281,  4, 0x01, 8, 0 }, /* HW_MAD_AUDIO_ENABLE */
+		{ 1, 0x800 + 0x0285,  7, 0x0F, 8, 0 }, /* HW_MAD_AUDIO_SLEEP_TIME */
+		{ 1, 0x800 + 0x0286, 10, 0x01, 8, 0 }, /* HW_MAD_TX_AUDIO_SWITCH_OFF */
+		/* MAD interrupt routing */
+		{ 1, 0x800 + 0x0081, 13, 0x02, 8, 0 }, /* MAD_AUDIO_INT_DEST_SELECT_REG */
+		{ 1, 0x800 + 0x00a4, 18, 0x01, 8, 0 }, /* MAD_AUDIO_INT_MASK_REG */
+		{ 1, 0x800 + 0x00ac, 23, 0x01, 8, 0 }, /* MAD_AUDIO_INT_STATUS_REG */
+		{ 1, 0x800 + 0x00b4, 28, 0x01, 8, 0 }, /* MAD_AUDIO_INT_CLEAR_REG */
+		/* VBAT interrupt routing */
+		{ 1, 0x800 + 0x0081, 17, 0x02, 8, 0 }, /* VBAT_INT_DEST_SELECT_REG */
+		{ 1, 0x800 + 0x00a4, 22, 0x08, 8, 0 }, /* VBAT_INT_MASK_REG */
+		{ 1, 0x800 + 0x00ac, 27, 0x08, 8, 0 }, /* VBAT_INT_STATUS_REG */
+		{ 1, 0x800 + 0x00b4, 32, 0x08, 8, 0 }, /* VBAT_INT_CLEAR_REG */
+		/* VBAT release interrupt */
+		{ 1, 0x800 + 0x0081, 53, 0x02, 8, 0 }, /* VBAT_RELEASE_INT_DEST_SELECT */
+		{ 1, 0x800 + 0x00a4, 54, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_MASK_REG */
+		{ 1, 0x800 + 0x00ac, 55, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_STATUS_REG */
+		{ 1, 0x800 + 0x00b4, 56, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_CLEAR_REG */
+		/* SLIMbus PGD port config (TX + RX) */
 		{ 1, 0x850, 33, 0x1E, 8, 1 }, /* SB_PGD_PORT_TX_WATERMARK_N */
 		{ 1, 0x850, 34, 0x01, 8, 1 }, /* SB_PGD_PORT_TX_ENABLE_N */
 		{ 1, 0x840, 35, 0x1E, 8, 1 }, /* SB_PGD_PORT_RX_WATERMARK_N */
 		{ 1, 0x840, 36, 0x01, 8, 1 }, /* SB_PGD_PORT_RX_ENABLE_N */
+		/* AANC (Active ANC) */
+		{ 1, 0x800 + 0x0a0b, 41, 0x04, 8, 0 }, /* AANC_FF_GAIN_ADAPTIVE */
+		{ 1, 0x800 + 0x0a0b, 42, 0x08, 8, 0 }, /* AANC_FFGAIN_ADAPTIVE_EN */
+		{ 1, 0x800 + 0x0a0e, 43, 0xFF, 8, 0 }, /* AANC_GAIN_CONTROL */
 	};
 
 	for (i = 0; i < ARRAY_SIZE(cdc_regs); i++) {
