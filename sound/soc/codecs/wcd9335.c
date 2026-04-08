@@ -167,7 +167,7 @@
 		{ "AMIC MUX" #id, "ADC5", "ADC5" },                        \
 		{ "AMIC MUX" #id, "ADC6", "ADC6" }
 
-#define NUM_CODEC_DAIS 7
+#define NUM_CODEC_DAIS 8
 
 enum {
 	WCD9335_RX0 = 0,
@@ -1237,12 +1237,13 @@ static int slim_rx_mux_put(struct snd_kcontrol *kc,
 		 * SLIM RX0 + AIF_MIX1_PB → ports 2,3 (hw 18,19) ch 146,147.
 		 * Downstream earpiece uses only SLIM RX0 MUX=AIF_MIX1_PB
 		 * (SLIM RX1 MUX=Off) and gets both channels from this
-		 * single mux selection.
+		 * single mux selection. Uses separate AIF_MIX1_PB DAI with
+		 * stream "AIF Mix Playback" (not "AIF1 Playback").
 		 */
 		list_add_tail(&wcd->rx_chs[port_id + 2].list,
-			      &wcd->dai[AIF1_PB].slim_ch_list);
+			      &wcd->dai[AIF_MIX1_PB].slim_ch_list);
 		list_add_tail(&wcd->rx_chs[port_id + 3].list,
-			      &wcd->dai[AIF1_PB].slim_ch_list);
+			      &wcd->dai[AIF_MIX1_PB].slim_ch_list);
 		break;
 	default:
 		dev_err(wcd->dev, "Unknown AIF %d\n",
@@ -2023,6 +2024,7 @@ static int wcd9335_get_channel_map(const struct snd_soc_dai *dai,
 	case AIF2_PB:
 	case AIF3_PB:
 	case AIF4_PB:
+	case AIF_MIX1_PB:
 		if (!rx_slot || !rx_num) {
 			dev_err(wcd->dev, "Invalid rx_slot %p or rx_num %p\n",
 				rx_slot, rx_num);
@@ -2155,6 +2157,21 @@ static struct snd_soc_dai_driver wcd9335_slim_dais[] = {
 		.id = AIF4_PB,
 		.playback = {
 			.stream_name = "AIF4 Playback",
+			.rates = WCD9335_RATES_MASK | WCD9335_FRAC_RATES_MASK |
+				 SNDRV_PCM_RATE_384000,
+			.formats = WCD9335_FORMATS_S16_S24_LE,
+			.rate_min = 8000,
+			.rate_max = 384000,
+			.channels_min = 1,
+			.channels_max = 2,
+		},
+		.ops = &wcd9335_dai_ops,
+	},
+	[7] = {
+		.name = "wcd9335_rx5",
+		.id = AIF_MIX1_PB,
+		.playback = {
+			.stream_name = "AIF Mix Playback",
 			.rates = WCD9335_RATES_MASK | WCD9335_FRAC_RATES_MASK |
 				 SNDRV_PCM_RATE_384000,
 			.formats = WCD9335_FORMATS_S16_S24_LE,
@@ -4321,8 +4338,8 @@ static const struct snd_soc_dapm_widget wcd9335_dapm_widgets[] = {
 	SND_SOC_DAPM_AIF_IN_E("AIF4 PB", "AIF4 Playback", 0, SND_SOC_NOPM,
 			      AIF4_PB, 0, wcd9335_codec_enable_slim,
 			      SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
-	SND_SOC_DAPM_AIF_IN_E("AIF MIX1 PB", "AIF1 Playback", 0,
-			      SND_SOC_NOPM, AIF1_PB, 0,
+	SND_SOC_DAPM_AIF_IN_E("AIF MIX1 PB", "AIF Mix Playback", 0,
+			      SND_SOC_NOPM, AIF_MIX1_PB, 0,
 			      wcd9335_codec_enable_slim,
 			      SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_MUX("SLIM RX0 MUX", SND_SOC_NOPM, WCD9335_RX0, 0,
