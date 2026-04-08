@@ -2,6 +2,7 @@
 // Copyright (c) 2011-2017, The Linux Foundation. All rights reserved.
 // Copyright (c) 2018, Linaro Limited
 
+#include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
@@ -63,6 +64,7 @@ struct q6adm {
 	struct aprv2_ibasic_rsp_result_t result;
 	struct mutex lock;
 	wait_queue_head_t matrix_map_wait;
+	struct dentry *debugfs_root;
 };
 
 struct q6adm_cmd_device_open_v5 {
@@ -564,6 +566,82 @@ int q6adm_close(struct device *dev, struct q6copp *copp)
 }
 EXPORT_SYMBOL_GPL(q6adm_close);
 
+#ifdef CONFIG_DEBUG_FS
+struct q6adm_copp_snapshot {
+	int afe_port;
+	int afe_port_id;
+	int copp_idx;
+	int id;
+	int topology;
+	int mode;
+	int rate;
+	int channels;
+	int bit_width;
+	int app_type;
+	u32 result_status;
+	u32 result_opcode;
+};
+
+static int q6adm_copps_show(struct seq_file *s, void *data)
+{
+	struct q6adm *adm = s->private;
+	struct q6copp *copp;
+	struct q6adm_copp_snapshot *snaps;
+	unsigned long flags;
+	int count = 0, i;
+
+	snaps = kcalloc(AFE_MAX_PORTS * MAX_COPPS_PER_PORT, sizeof(*snaps),
+			GFP_KERNEL);
+	if (!snaps)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&adm->copps_list_lock, flags);
+	list_for_each_entry(copp, &adm->copps_list, node) {
+		if (count >= AFE_MAX_PORTS * MAX_COPPS_PER_PORT)
+			break;
+		snaps[count].afe_port = copp->afe_port;
+		snaps[count].afe_port_id = q6afe_get_port_id(copp->afe_port);
+		snaps[count].copp_idx = copp->copp_idx;
+		snaps[count].id = copp->id;
+		snaps[count].topology = copp->topology;
+		snaps[count].mode = copp->mode;
+		snaps[count].rate = copp->rate;
+		snaps[count].channels = copp->channels;
+		snaps[count].bit_width = copp->bit_width;
+		snaps[count].app_type = copp->app_type;
+		snaps[count].result_status = copp->result.status;
+		snaps[count].result_opcode = copp->result.opcode;
+		count++;
+	}
+	spin_unlock_irqrestore(&adm->copps_list_lock, flags);
+
+	if (count == 0) {
+		seq_puts(s, "No active COPPs\n");
+	} else {
+		for (i = 0; i < count; i++) {
+			seq_printf(s, "COPP[%d]:\n", i);
+			seq_printf(s, "  afe_port index : %d\n", snaps[i].afe_port);
+			seq_printf(s, "  afe_port id    : 0x%x\n", snaps[i].afe_port_id);
+			seq_printf(s, "  copp_idx       : %d\n", snaps[i].copp_idx);
+			seq_printf(s, "  id (adsp)      : %d\n", snaps[i].id);
+			seq_printf(s, "  topology       : 0x%x\n", snaps[i].topology);
+			seq_printf(s, "  mode           : %d\n", snaps[i].mode);
+			seq_printf(s, "  rate           : %d\n", snaps[i].rate);
+			seq_printf(s, "  channels       : %d\n", snaps[i].channels);
+			seq_printf(s, "  bit_width      : %d\n", snaps[i].bit_width);
+			seq_printf(s, "  app_type       : %d\n", snaps[i].app_type);
+			seq_printf(s, "  result.status  : 0x%x\n", snaps[i].result_status);
+			seq_printf(s, "  result.opcode  : 0x%x\n", snaps[i].result_opcode);
+			seq_putc(s, '\n');
+		}
+	}
+
+	kfree(snaps);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(q6adm_copps);
+#endif /* CONFIG_DEBUG_FS */
+
 static int q6adm_probe(struct apr_device *adev)
 {
 	struct device *dev = &adev->dev;
@@ -583,7 +661,21 @@ static int q6adm_probe(struct apr_device *adev)
 	INIT_LIST_HEAD(&adm->copps_list);
 	spin_lock_init(&adm->copps_list_lock);
 
+#ifdef CONFIG_DEBUG_FS
+	adm->debugfs_root = debugfs_create_dir("q6adm", NULL);
+	debugfs_create_file("copps", 0444, adm->debugfs_root, adm, &q6adm_copps_fops);
+#endif
+
 	return devm_of_platform_populate(dev);
+}
+
+static void q6adm_remove(struct apr_device *adev)
+{
+	struct q6adm *adm = dev_get_drvdata(&adev->dev);
+
+#ifdef CONFIG_DEBUG_FS
+	debugfs_remove_recursive(adm->debugfs_root);
+#endif
 }
 
 #ifdef CONFIG_OF
@@ -596,6 +688,7 @@ MODULE_DEVICE_TABLE(of, q6adm_device_id);
 
 static struct apr_driver qcom_q6adm_driver = {
 	.probe = q6adm_probe,
+	.remove = q6adm_remove,
 	.callback = q6adm_callback,
 	.driver = {
 		.name = "qcom-q6adm",
