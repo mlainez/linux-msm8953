@@ -1669,17 +1669,67 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 		return -ENOMEM;
 
 	/*
-	 * Do NOT write MULTI_CHNL or per-port PORT_CFG from the kernel.
-	 * LineageOS investigation shows the downstream kernel only sets the
-	 * global RX PORT_CFG at 0x040 (via CDC_REG_CFG from ADSP) — no
-	 * per-port PORT_CFG or MULTI_CHNL writes are visible on the IFC
-	 * device during working earpiece playback. The ADSP handles
-	 * MULTI_CHNL and port configuration internally when it processes
-	 * CONNECT_SINK and AFE_DEVICE_START.
+	 * Write MULTI_CHNL and PORT_CFG for each port, matching WCD934x.
+	 * MULTI_CHNL tells the PGD hardware which SLIMbus channel(s)
+	 * feed each port. PORT_CFG sets watermark and enables the port.
+	 * Without these, the codec port gets data but can't process it
+	 * (PORT_INT_STATUS shows bit 7 = error condition).
 	 */
-	i = 0;
-	list_for_each_entry(ch, slim_ch_list, list)
-		cfg->chs[i++] = ch->ch_num;
+	{
+		u16 payload = 0;
+		int ret2;
+
+		list_for_each_entry(ch, slim_ch_list, list)
+			payload |= 1 << ch->shift;
+
+		i = 0;
+		list_for_each_entry(ch, slim_ch_list, list) {
+			cfg->chs[i++] = ch->ch_num;
+			if (direction == SNDRV_PCM_STREAM_PLAYBACK) {
+				/*
+				 * MULTI_CHNL: tell PGD which channel(s) feed this port.
+				 * Uses regmap (paged access, offset 0x140+).
+				 */
+				ret2 = regmap_write(wcd->regmap,
+					WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(ch->port),
+					payload);
+				dev_dbg(wcd->dev,
+					"MULTI_CHNL_RX[%d]=0x%x ret=%d\n",
+					ch->port, payload, ret2);
+
+				/*
+				 * PORT_CFG: set watermark + enable.
+				 * Uses IFC flat write (offset 0x40+, within range).
+				 */
+				ret2 = wcd9335_ifc_write(wcd,
+					0x40 + ch->port,
+					WCD9335_SLIM_WATER_MARK_VAL);
+				dev_dbg(wcd->dev,
+					"PORT_CFG[%d]=0x%x ret=%d\n",
+					ch->port,
+					WCD9335_SLIM_WATER_MARK_VAL, ret2);
+			} else {
+				ret2 = regmap_write(wcd->regmap,
+					WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_0(ch->port),
+					payload & 0xFF);
+				dev_dbg(wcd->dev,
+					"MULTI_CHNL_TX0[%d]=0x%x ret=%d\n",
+					ch->port, payload & 0xFF, ret2);
+
+				ret2 = regmap_write(wcd->regmap,
+					WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_1(ch->port),
+					(payload >> 8) & 0xFF);
+
+				ret2 = wcd9335_ifc_write(wcd,
+					0x50 + ch->port,
+					WCD9335_SLIM_WATER_MARK_VAL);
+				dev_dbg(wcd->dev,
+					"PORT_CFG_TX[%d]=0x%x ret=%d\n",
+					ch->port,
+					WCD9335_SLIM_WATER_MARK_VAL, ret2);
+			}
+		}
+	}
 
 	dai_data->sruntime = slim_stream_allocate(wcd->slim, "WCD9335-SLIM");
 
