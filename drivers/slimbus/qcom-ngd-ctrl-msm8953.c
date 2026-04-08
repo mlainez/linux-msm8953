@@ -1187,28 +1187,21 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 
 		if (txn.msg->num_bytes == 0) {
 			/*
-			 * DEF_ACT_CHAN USR message format (Qualcomm encoding):
+			 * DEF_ACT_CHAN USR message format:
 			 * Byte 0: (dataf << 5) | (laddr & 0x1f)
 			 * Byte 1: (sampleszbits >> 2) | (CL << 5) | (auxf << 6)
 			 * Byte 2: (rootexp << 4) | protocol
-			 * Byte 3: prrate (Qualcomm: base_rate_code + (seglen-1)*8)
+			 * Byte 3: standard SLIMbus prrate | FL for ISO
 			 * Byte 4: TID
 			 * Byte 5+: channel IDs
 			 *
 			 * dataf=0 (NOT_DEFINED) matches downstream tasha.
-			 * prrate uses Qualcomm encoding, NOT SLIMbus standard.
+			 * prrate uses standard SLIMbus presence rate code
+			 * (from slim_get_prate_code() via stream_prepare),
+			 * with FL (Frequency Locked) bit set for ISO protocol.
+			 * Matches both downstream slim_calc_prrate() and
+			 * reference qcom_slim_ngd_enable_stream().
 			 */
-			int seglen = (rt->bps + 7) / 8; /* bytes per sample */
-			int base_rate_code;
-			int qcom_prrate;
-
-			/* Qualcomm base rate codes (from downstream slim_ch_rate) */
-			if (rt->rate % 11025 == 0) {
-				base_rate_code = 2; /* 11025Hz family */
-			} else {
-				base_rate_code = 1; /* 4000Hz family */
-			}
-			qcom_prrate = base_rate_code + (seglen - 1) * 8;
 
 			/* Byte 0: dataf=0 (NOT_DEFINED) + laddr low 5 bits */
 			wbuf[txn.msg->num_bytes++] = sdev->laddr & 0x1f;
@@ -1232,8 +1225,12 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 			/* Byte 2: rootexp + protocol */
 			wbuf[txn.msg->num_bytes++] = exp << 4 | rt->prot;
 
-			/* Byte 3: Qualcomm prrate (no FL flag) */
-			wbuf[txn.msg->num_bytes++] = qcom_prrate;
+			/* Byte 3: standard SLIMbus prrate + FL for ISO */
+			if (rt->prot == SLIM_PROTO_ISO)
+				wbuf[txn.msg->num_bytes++] =
+					port->ch.prrate | SLIM_CHANNEL_CONTENT_FL;
+			else
+				wbuf[txn.msg->num_bytes++] = port->ch.prrate;
 
 			ret = slim_alloc_txn_tid(ctrl, &txn);
 			if (ret) {
@@ -1243,9 +1240,9 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 			wbuf[txn.msg->num_bytes++] = txn.tid;
 
 			dev_info(ctrl->dev,
-				 "DEF_ACT_CHAN bytes: [%02x %02x %02x %02x TID=%d] coef=%d exp=%d seglen=%d\n",
+				 "DEF_ACT_CHAN bytes: [%02x %02x %02x %02x TID=%d] coef=%d exp=%d prrate=%d\n",
 				 wbuf[0], wbuf[1], wbuf[2], wbuf[3],
-				 txn.tid, coef, exp, seglen);
+				 txn.tid, coef, exp, port->ch.prrate);
 		}
 		wbuf[txn.msg->num_bytes++] = port->ch.id;
 	}
