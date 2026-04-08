@@ -1448,21 +1448,31 @@ static int msm8953_slim_power_up(struct msm8953_slim_ctrl *dev)
 	ngd = ngd_base(dev);
 	laddr = readl_relaxed(ngd + NGD_STATUS);
 
-	if (laddr & NGD_LADDR) {
+	if (laddr & NGD_LADDR)
 		dev_dbg(dev->dev, "NGD already has LADDR, stat=0x%x\n",
-			 laddr);
-		msm8953_slim_ngd_setup(dev);
-		return 0;
-	}
+			laddr);
 
+	/*
+	 * Always reinitialize DMA and wait for MCAP, even when NGD_LADDR
+	 * is already set. After SSR recovery, BAM was torn down but the
+	 * NGD hardware might still have a stale LADDR. Skipping DMA init
+	 * here would leave us with no BAM RX (can't receive MCAP or ACKs)
+	 * and no BAM TX (can't send REPORT_SATELLITE).
+	 */
 	reinit_completion(&dev->reconf);
 
-	/* BAM DMA needed for receiving REPLY_VALUE during init window */
 	ret = msm8953_slim_init_dma(dev);
 	if (ret)
 		dev_warn(dev->dev, "DMA init failed: %d\n", ret);
 
-	/* Configure NGD registers */
+	/*
+	 * Allow DMA RX descriptors to be fully submitted before enabling
+	 * the NGD message queues. Without this, the ADSP may send MCAP
+	 * before the BAM RX chain is consuming, causing it to be lost.
+	 */
+	usleep_range(1000, 2000);
+
+	/* Configure NGD registers — enables RX/TX message queues */
 	msm8953_slim_ngd_setup(dev);
 
 	/*
