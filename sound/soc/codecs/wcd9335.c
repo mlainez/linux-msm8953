@@ -1914,12 +1914,18 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 			 dai->id, substream->stream, cfg->port_mask,
 			 cfg->bps, cfg->rate);
 		/*
+		 * Override PORT_CFG to match downstream value (0x05).
+		 * The ADSP writes 0x19 (watermark=12) via CDC_REG_CFG
+		 * but the downstream has 0x05 (watermark=2) during
+		 * working earpiece playback. Force the downstream value.
+		 */
+		wcd9335_ifc_write(wcd, 0x40, WCD9335_SLIM_WATER_MARK_VAL);
+
+		/*
 		 * Activate SLIMbus channels NOW, after AFE DEVICE_START.
 		 * Downstream tasha_codec_enable_slimrx() POST_PMU does
 		 * wcd9xxx_cfg_slim_sch_rx() here, AFTER the AFE port is
-		 * running. The ADSP needs the AFE port active before it
-		 * can link SLIMbus channels to the data path.
-		 * slim_stream_prepare() was called in hw_params.
+		 * running. slim_stream_prepare() was called in hw_params.
 		 */
 		if (dai_data->sruntime) {
 			int ret2 = slim_stream_enable(dai_data->sruntime);
