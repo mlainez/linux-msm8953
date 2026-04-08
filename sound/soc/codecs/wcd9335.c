@@ -4867,6 +4867,22 @@ static int wcd9335_debugfs_ifc_ports_show(struct seq_file *s, void *data)
 		seq_printf(s, "PORT_STATUS (0x%03x): 0x%02x\n",
 			   WCD9335_SLIM_PGD_PORT_INT_STATUS(0), val);
 
+	/* Per-port interrupt status (shows overflow/underflow/data conditions) */
+	for (i = 0; i < 4; i++) {
+		u8 pv = 0;
+		ret = wcd9335_ifc_read(wcd, 0x080 + i, &pv);
+		if (!ret)
+			seq_printf(s, "PORT_INT_STATUS[%d] (0x%03x): 0x%02x\n", i, 0x080 + i, pv);
+	}
+
+	/* RX port interrupt source registers */
+	for (i = 0; i < 4; i++) {
+		u8 pv = 0;
+		ret = wcd9335_ifc_read(wcd, 0x060 + i, &pv);
+		if (!ret && pv)
+			seq_printf(s, "PORT_INT_RX_SRC[%d] (0x%03x): 0x%02x\n", i, 0x060 + i, pv);
+	}
+
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(wcd9335_debugfs_ifc_ports);
