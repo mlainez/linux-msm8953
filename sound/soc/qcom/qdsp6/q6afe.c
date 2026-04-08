@@ -1751,9 +1751,14 @@ static void q6afe_send_cdc_config(struct q6afe *afe)
 			u16 rx_slave_port_offset;
 		} __packed slave_cfg = {
 			.minor_version = 1,
-			/* WCD9335 PGD EA: manf=0x0217 prod=0x01a0 dev_idx=1 inst=0 */
-			.device_enum_addr_lsw = 0x01a00100,
-			.device_enum_addr_msw = 0x00000217,
+			/*
+			 * WCD9335 PGD EA: manf=0x0217 prod=0x01a0 dev_idx=1 inst=0
+			 * Packed from SLIMbus wire bytes [inst, dev, prod_lo, prod_hi, manf_lo, manf_hi]:
+			 *   ea_lsw = (ea[0]<<24)|(ea[1]<<16)|(ea[2]<<8)|ea[3]
+			 *   ea_msw = (ea[4]<<8)|ea[5]
+			 */
+			.device_enum_addr_lsw = 0x0001a001,
+			.device_enum_addr_msw = 0x00001702,
 			.tx_slave_port_offset = 0,
 			.rx_slave_port_offset = 16,
 		};
