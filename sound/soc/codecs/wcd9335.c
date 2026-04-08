@@ -1872,9 +1872,10 @@ static int wcd9335_hw_params(struct snd_pcm_substream *substream,
 	wcd9335_slim_set_hw_params(wcd, &wcd->dai[dai->id], substream->stream);
 
 	/*
-	 * Activate SLIMbus channels HERE (during hw_params) so they exist
-	 * BEFORE AFE DEVICE_START. The ADSP looks for shared channels
-	 * during DEVICE_START to link them to the AFE port.
+	 * SLIMbus stream activation moved to trigger() POST_PMU.
+	 * Downstream tasha_codec_enable_slimrx() activates channels
+	 * AFTER AFE DEVICE_START, not before. The ADSP needs the AFE
+	 * port to be started first, then SLIMbus channels are set up.
 	 */
 	{
 		struct wcd_slim_codec_dai_data *dd = &wcd->dai[dai->id];
@@ -1885,11 +1886,7 @@ static int wcd9335_hw_params(struct snd_pcm_substream *substream,
 			ret2 = slim_stream_prepare(dd->sruntime, &dd->sconfig);
 			if (ret2)
 				dev_warn(wcd->dev, "stream_prepare: %d\n", ret2);
-			else {
-				ret2 = slim_stream_enable(dd->sruntime);
-				if (ret2)
-					dev_warn(wcd->dev, "stream_enable: %d\n", ret2);
-			}
+			/* slim_stream_enable() called from trigger START */
 		}
 	}
 
@@ -1916,7 +1913,20 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 			 "trigger START: dai=%d stream=%d ports=0x%lx bps=%d rate=%d\n",
 			 dai->id, substream->stream, cfg->port_mask,
 			 cfg->bps, cfg->rate);
-		/* Stream activated in hw_params (before AFE start) */
+		/*
+		 * Activate SLIMbus channels NOW, after AFE DEVICE_START.
+		 * Downstream tasha_codec_enable_slimrx() POST_PMU does
+		 * wcd9xxx_cfg_slim_sch_rx() here, AFTER the AFE port is
+		 * running. The ADSP needs the AFE port active before it
+		 * can link SLIMbus channels to the data path.
+		 * slim_stream_prepare() was called in hw_params.
+		 */
+		if (dai_data->sruntime) {
+			int ret2 = slim_stream_enable(dai_data->sruntime);
+
+			if (ret2)
+				dev_warn(wcd->dev, "stream_enable: %d\n", ret2);
+		}
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
