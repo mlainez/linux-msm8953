@@ -391,15 +391,29 @@ int q6routing_stream_open(int fedai_id, int perf_mode,
 
 	payload.num_copps = 0; /* only RX needs to use payload */
 	topology = 0x00010314; /* DEFAULT_COPP_TOPOLOGY — matches downstream */
+
+	dev_info(routing_data->dev,
+		 "stream_open: port_id=0x%x path=%d rate=%d ch=%d bps=%d fedai=%d stream=%d\n",
+		 session->port_id, session->path_type, session->sample_rate,
+		 session->channels, session->bits_per_sample,
+		 fedai_id, stream_id);
+
 	copp = q6adm_open(routing_data->dev, session->port_id,
 			      session->path_type, session->sample_rate,
 			      session->channels, topology, perf_mode,
 			      session->bits_per_sample, 0, 0);
 
 	if (IS_ERR_OR_NULL(copp)) {
+		dev_err(routing_data->dev,
+			"q6adm_open FAILED: port=0x%x err=%ld\n",
+			session->port_id, PTR_ERR(copp));
 		mutex_unlock(&routing_data->lock);
 		return -EINVAL;
 	}
+
+	dev_info(routing_data->dev,
+		 "stream_open: copp_idx=%d for port=0x%x\n",
+		 q6adm_get_copp_id(copp), session->port_id);
 
 	copp_idx = q6adm_get_copp_id(copp);
 	set_bit(copp_idx, &session->copp_map);

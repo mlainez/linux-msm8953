@@ -1890,9 +1890,57 @@ int q6afe_port_start(struct q6afe_port *port)
 		}
 	}
 
-	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
-				       AFE_MODULE_AUDIO_DEV_INTERFACE,
-				       sizeof(port->port_cfg));
+	/* Dump the raw port config for SLIMbus ports */
+	if (port_id >= 0x4000 && port_id <= 0x400d) {
+		struct afe_param_id_slimbus_cfg *sc = &port->port_cfg.slim_cfg;
+
+		dev_info(afe->dev,
+			 "AFE SLIM 0x%x: ver=%d dev_id=%d bw=%d fmt=%d nch=%d rate=%d ch=[%d,%d,%d,%d] param_id=0x%x size=%zu\n",
+			 port_id, sc->sb_cfg_minor_version,
+			 sc->slimbus_dev_id, sc->bit_width,
+			 sc->data_format, sc->num_channels,
+			 sc->sample_rate,
+			 sc->shared_ch_mapping[0], sc->shared_ch_mapping[1],
+			 sc->shared_ch_mapping[2], sc->shared_ch_mapping[3],
+			 param_id, sizeof(port->port_cfg));
+	}
+
+	/*
+	 * Send only the correct struct size for this port type, not the
+	 * full union. The ADSP validates param_size against the expected
+	 * struct size for the given param_id.
+	 */
+	{
+		size_t cfg_size;
+
+		switch (param_id) {
+		case AFE_PARAM_ID_SLIMBUS_CONFIG:
+			cfg_size = sizeof(port->port_cfg.slim_cfg);
+			break;
+		case AFE_PARAM_ID_HDMI_CONFIG:
+			cfg_size = sizeof(port->port_cfg.hdmi_multi_ch);
+			break;
+		case AFE_PARAM_ID_I2S_CONFIG:
+			cfg_size = sizeof(port->port_cfg.i2s_cfg);
+			break;
+		case AFE_PARAM_ID_TDM_CONFIG:
+			cfg_size = sizeof(port->port_cfg.tdm_cfg);
+			break;
+		case AFE_PARAM_ID_CODEC_DMA_CONFIG:
+			cfg_size = sizeof(port->port_cfg.dma_cfg);
+			break;
+		case AFE_PARAM_ID_USB_AUDIO_CONFIG:
+			cfg_size = sizeof(port->port_cfg.usb_cfg);
+			break;
+		default:
+			cfg_size = sizeof(port->port_cfg);
+			break;
+		}
+
+		ret = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
+					       AFE_MODULE_AUDIO_DEV_INTERFACE,
+					       cfg_size);
+	}
 	if (ret) {
 		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\n",
 			port_id, ret);
@@ -1933,6 +1981,10 @@ int q6afe_port_start(struct q6afe_port *port)
 	if (ret)
 		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\n",
 			port_id, ret);
+	else
+		dev_info(afe->dev,
+			 "AFE DEVICE_START 0x%x: OK (result=0x%x)\n",
+			 port_id, port->result.status);
 
 	return ret;
 }
