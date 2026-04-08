@@ -25,6 +25,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/dmaengine.h>
 #include <linux/slimbus.h>
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
@@ -392,9 +393,28 @@ struct msm8953_slim_ctrl {
 	void *data_buf[2];
 	dma_addr_t data_buf_phys[2];
 	bool data_pipe_armed[2];
+
+#ifdef CONFIG_DEBUG_FS
+	struct dentry *debugfs_root;
+	/* Message trace ring buffer */
+#define SLIM_MSG_LOG_SIZE 64
+	struct {
+		u64 timestamp;
+		u8 dir;       /* 0=TX, 1=RX */
+		u8 len;
+		u8 data[16];
+	} msg_log[SLIM_MSG_LOG_SIZE];
+	unsigned int msg_log_head;
+	spinlock_t msg_log_lock;
+#endif
 };
 
 /* ---- Helpers ------------------------------------------------------------- */
+
+#ifdef CONFIG_DEBUG_FS
+static void msm8953_slim_log_msg(struct msm8953_slim_ctrl *dev,
+				 u8 dir, u8 *buf, u8 len);
+#endif
 
 static inline void __iomem *ngd_base(struct msm8953_slim_ctrl *dev)
 {
@@ -467,11 +487,15 @@ static void msm8953_slim_rx(struct msm8953_slim_ctrl *dev, u8 *buf)
 	mt  = (buf[0] >> 5) & 0x7;
 	mc  = buf[1];
 
+#ifdef CONFIG_DEBUG_FS
+	msm8953_slim_log_msg(dev, 1, buf, min_t(u8, len, 16));
+#endif
+
 	if (mc != 0x64)  /* Don't spam for REPLY_VALUE */
-		dev_info(dev->dev, "RX dispatch: mt=0x%x mc=0x%x len=%d [%02x %02x %02x %02x %02x]\n",
-			 mt, mc, len, buf[0], buf[1], buf[2], buf[3], buf[4]);
+		dev_dbg(dev->dev, "RX dispatch: mt=0x%x mc=0x%x len=%d [%02x %02x %02x %02x %02x]\n",
+			mt, mc, len, buf[0], buf[1], buf[2], buf[3], buf[4]);
 	else if (buf[4] != 0)  /* Only log non-zero REPLY_VALUE */
-		dev_info(dev->dev, "RX REPLY_VALUE: tid=%d data=0x%02x\n",
+		dev_dbg(dev->dev, "RX REPLY_VALUE: tid=%d data=0x%02x\n",
 			buf[3], buf[4]);
 
 	/* MASTER_CAPABILITY: signal the power-up completion */
@@ -583,10 +607,10 @@ static irqreturn_t msm8953_slim_interrupt(int irq, void *d)
 			struct completion *comp = dev->wr_comp;
 
 			dev->wr_comp = NULL;
-			dev_info(dev->dev, "TX_MSG_SENT: completing wr_comp\n");
+			dev_dbg(dev->dev, "TX_MSG_SENT: completing wr_comp\n");
 			complete(comp);
 		} else {
-			dev_info(dev->dev, "TX_MSG_SENT: no wr_comp set!\n");
+			dev_dbg(dev->dev, "TX_MSG_SENT: no wr_comp set!\n");
 		}
 	}
 
@@ -758,12 +782,12 @@ static void msm8953_slim_rx_msgq_cb(void *args)
 
 		/* Full dump for value messages to debug data=0x00 issue */
 		if (mc == 0x64 || mc == 0x04) {
-			dev_info(dev->dev,
+			dev_dbg(dev->dev,
 				 "BAM RX REPLY: [%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x]\n",
 				 p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
 				 p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
 		} else {
-			dev_info(dev->dev,
+			dev_dbg(dev->dev,
 				 "BAM RX cb: [%02x %02x %02x %02x %02x]\n",
 				 p[0], p[1], p[2], p[3], p[4]);
 		}
@@ -937,7 +961,7 @@ static int msm8953_slim_arm_data_pipe(struct msm8953_slim_ctrl *dev,
 	desc_addr = readl_relaxed(dev->bam_base +
 				  BAM17_P_DESC_FIFO_ADDR(bam_pipe));
 
-	dev_info(dev->dev,
+	dev_dbg(dev->dev,
 		 "BAM pipe %d: P_CTRL=0x%x DESC_ADDR=0x%x FIFO_SZ=0x%x (before)\n",
 		 bam_pipe, ctrl, desc_addr,
 		 readl_relaxed(dev->bam_base + BAM17_P_FIFO_SIZES(bam_pipe)));
@@ -992,7 +1016,7 @@ static int msm8953_slim_arm_data_pipe(struct msm8953_slim_ctrl *dev,
 	ctrl = readl_relaxed(dev->bam_base + BAM17_P_CTRL(bam_pipe));
 	desc_addr = readl_relaxed(dev->bam_base +
 				  BAM17_P_DESC_FIFO_ADDR(bam_pipe));
-	dev_info(dev->dev,
+	dev_dbg(dev->dev,
 		 "BAM pipe %d armed: P_CTRL=0x%x DESC_ADDR=0x%x FIFO_SZ=0x%x\n",
 		 bam_pipe, ctrl, desc_addr,
 		 readl_relaxed(dev->bam_base + BAM17_P_FIFO_SIZES(bam_pipe)));
@@ -1047,14 +1071,14 @@ static int msm8953_slim_enable_pgd_port(struct msm8953_slim_ctrl *dev,
 				 chan_name, PTR_ERR(chan));
 		} else {
 			dev->data_chan[port_idx] = chan;
-			dev_info(dev->dev,
+			dev_dbg(dev->dev,
 				 "Data DMA chan '%s' acquired for PGD port %d\n",
 				 chan_name, pgd_port);
 		}
 	}
 
 	stat = readl_relaxed(dev->base + PGD_PORT_STATn(pgd_port));
-	dev_info(dev->dev,
+	dev_dbg(dev->dev,
 		 "PGD port %d enabled: CFG=0x%x STAT=0x%x\n",
 		 pgd_port,
 		 readl_relaxed(dev->base + PGD_PORT_CFGn(pgd_port)),
@@ -1084,7 +1108,7 @@ static void msm8953_slim_ngd_setup(struct msm8953_slim_ctrl *dev)
 		       ngd + NGD_CFG);
 	mb();
 
-	dev_info(dev->dev,
+	dev_dbg(dev->dev,
 		 "NGD setup: cfg=0x%x int_en=0x%x rxmsgq=0x%x stat=0x%x\n",
 		 readl_relaxed(ngd + NGD_CFG),
 		 readl_relaxed(ngd + NGD_INT_EN),
@@ -1153,7 +1177,7 @@ static int msm8953_slim_xfer_msg_sync(struct slim_controller *ctrl,
 			slim_free_txn_tid(ctrl, txn);
 			return -ETIMEDOUT;
 		}
-		dev_info(ctrl->dev, "USR msg ACK OK: mc=0x%x tid=%d\n",
+		dev_dbg(ctrl->dev, "USR msg ACK OK: mc=0x%x tid=%d\n",
 			 txn->mc, txn->tid);
 	}
 
@@ -1239,7 +1263,7 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 			}
 			wbuf[txn.msg->num_bytes++] = txn.tid;
 
-			dev_info(ctrl->dev,
+			dev_dbg(ctrl->dev,
 				 "DEF_ACT_CHAN bytes: [%02x %02x %02x %02x TID=%d] coef=%d exp=%d prrate=%d\n",
 				 wbuf[0], wbuf[1], wbuf[2], wbuf[3],
 				 txn.tid, coef, exp, port->ch.prrate);
@@ -1251,7 +1275,7 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 	txn.rl = txn.msg->num_bytes + 4;
 	txn.comp = &done;
 
-	dev_info(ctrl->dev,
+	dev_dbg(ctrl->dev,
 		 "enable_stream: DEF_ACT_CHAN laddr=0x%x nports=%d bps=%d prot=%d\n",
 		 sdev->laddr, rt->num_ports, rt->bps, rt->prot);
 
@@ -1425,7 +1449,7 @@ static int msm8953_slim_power_up(struct msm8953_slim_ctrl *dev)
 	laddr = readl_relaxed(ngd + NGD_STATUS);
 
 	if (laddr & NGD_LADDR) {
-		dev_info(dev->dev, "NGD already has LADDR, stat=0x%x\n",
+		dev_dbg(dev->dev, "NGD already has LADDR, stat=0x%x\n",
 			 laddr);
 		msm8953_slim_ngd_setup(dev);
 		return 0;
@@ -1461,7 +1485,7 @@ static int msm8953_slim_power_up(struct msm8953_slim_ctrl *dev)
 		u32 cfg  = readl_relaxed(ngd + NGD_CFG);
 		u32 stat = readl_relaxed(ngd + NGD_STATUS);
 
-		dev_info(dev->dev,
+		dev_dbg(dev->dev,
 			 "MCAP timeout, proceeding. stat=0x%x cfg=0x%x\n",
 			 stat, cfg);
 
@@ -1596,9 +1620,9 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 			la = SLIM_LA_MGR;      /* destination = manager */
 			wbuf[i++] = slim_port; /* codec port number */
 
-			dev_info(dev->dev,
-				 "CONNECT: la=%d port=%d\n",
-				 txn->la, slim_port);
+			dev_dbg(dev->dev,
+			       "CONNECT: la=%d port=%d\n",
+			       txn->la, slim_port);
 		}
 		if (txn->mc != SLIM_USR_MC_DISCONNECT_PORT)
 			wbuf[i++] = txn->msg->wbuf[1]; /* channel number */
@@ -1615,11 +1639,11 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 		txn->msg->wbuf = wbuf;
 		txn->rl = txn->msg->num_bytes + 4;
 
-		dev_info(dev->dev,
-			 "CONNECT: mc=0x%x la=%d port=%d chan=%d tid=%d\n",
-			 txn->mc, wbuf[0], wbuf[1],
-			 (txn->mc != SLIM_USR_MC_DISCONNECT_PORT) ? wbuf[2] : -1,
-			 txn->tid);
+		dev_dbg(dev->dev,
+			"CONNECT: mc=0x%x la=%d port=%d chan=%d tid=%d\n",
+			txn->mc, wbuf[0], wbuf[1],
+			(txn->mc != SLIM_USR_MC_DISCONNECT_PORT) ? wbuf[2] : -1,
+			txn->tid);
 	}
 
 	txn->rl--;
@@ -1653,10 +1677,10 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 		*(puc++) = txn->ec & 0xFF;
 		*(puc++) = (txn->ec >> 8) & 0xFF;
 		if (txn->mc == SLIM_MSG_MC_REQUEST_VALUE)
-			dev_info(dev->dev, "REQ_VALUE: la=%d ec=0x%04x len=%d\n",
+			dev_dbg(dev->dev, "REQ_VALUE: la=%d ec=0x%04x len=%d\n",
 				 la, txn->ec, txn->msg ? txn->msg->num_bytes : 0);
 		else if (txn->mc == SLIM_MSG_MC_CHANGE_VALUE)
-			dev_info(dev->dev, "CHG_VALUE: la=%d ec=0x%04x len=%d\n",
+			dev_dbg(dev->dev, "CHG_VALUE: la=%d ec=0x%04x len=%d\n",
 				 la, txn->ec, txn->msg ? txn->msg->num_bytes : 0);
 	}
 
@@ -1670,10 +1694,9 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 	if (txn_mc != 0x60 && txn_mc != 0x68) {  /* Skip VALUE read/write spam */
 		u8 *tb = (u8 *)pbuf;
 
-		dev_info(dev->dev,
-			 "TX mc=0x%x la=%d rl=%d: [%02x %02x %02x %02x %02x %02x %02x %02x]\n",
-			 txn_mc, la, txn->rl,
-			 tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7]);
+#ifdef CONFIG_DEBUG_FS
+		msm8953_slim_log_msg(dev, 0, tb, min_t(u8, txn->rl, 16));
+#endif
 	}
 
 	/*
@@ -1720,7 +1743,7 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 			slim_free_txn_tid(ctrl, txn);
 			ret = 0; /* non-fatal */
 		} else {
-			dev_info(dev->dev,
+			dev_dbg(dev->dev,
 				 "CONNECT ACK received! mc=0x%x tid=%d\n",
 				 txn_mc, txn->tid);
 		}
@@ -1807,7 +1830,7 @@ static int msm8953_slim_get_laddr(struct slim_controller *ctrl,
 	*puc++ = txn.tid;
 	memcpy(puc, ea_bytes, 6);
 
-	dev_info(dev->dev,
+	dev_dbg(dev->dev,
 		 "ADDR_QUERY: ea=%04x:%04x:%d:%d tid=%d [%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x]\n",
 		 ea->manf_id, ea->prod_code, ea->dev_index, ea->instance,
 		 txn.tid,
@@ -2115,6 +2138,109 @@ static int msm8953_slim_runtime_idle(struct device *device)
 	return -EAGAIN;
 }
 
+/* ---- debugfs ------------------------------------------------------------- */
+
+#ifdef CONFIG_DEBUG_FS
+static void msm8953_slim_log_msg(struct msm8953_slim_ctrl *dev,
+				 u8 dir, u8 *buf, u8 len)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->msg_log_lock, flags);
+	dev->msg_log[dev->msg_log_head].timestamp = ktime_get_ns();
+	dev->msg_log[dev->msg_log_head].dir = dir;
+	dev->msg_log[dev->msg_log_head].len = len;
+	memcpy(dev->msg_log[dev->msg_log_head].data, buf, min_t(u8, len, 16));
+	dev->msg_log_head = (dev->msg_log_head + 1) % SLIM_MSG_LOG_SIZE;
+	spin_unlock_irqrestore(&dev->msg_log_lock, flags);
+}
+
+static const char *msm8953_slim_state_str(enum msm8953_slim_state state)
+{
+	switch (state) {
+	case MSM8953_SLIM_AWAKE:  return "AWAKE";
+	case MSM8953_SLIM_IDLE:   return "IDLE";
+	case MSM8953_SLIM_ASLEEP: return "ASLEEP";
+	case MSM8953_SLIM_DOWN:   return "DOWN";
+	default:                  return "UNKNOWN";
+	}
+}
+
+static int msm8953_slim_status_show(struct seq_file *s, void *unused)
+{
+	struct msm8953_slim_ctrl *dev = s->private;
+
+	seq_printf(s, "state: %s\n", msm8953_slim_state_str(dev->state));
+	seq_printf(s, "qmi: %s\n",
+		   completion_done(&dev->qmi_up) ? "up" : "down");
+	seq_printf(s, "ctrl: %s\n",
+		   completion_done(&dev->ctrl_up) ? "up" : "down");
+	seq_printf(s, "bam_tx: %s\n", dev->use_bam_tx ? "yes" : "no");
+	seq_printf(s, "pgdla: 0x%02x\n", dev->pgdla);
+	seq_printf(s, "apps_pipes: 0x%08x\n", dev->apps_pipes);
+	seq_printf(s, "ssr: %s\n",
+		   atomic_read(&dev->ssr_in_progress) ? "yes" : "no");
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(msm8953_slim_status);
+
+static int msm8953_slim_ngd_regs_show(struct seq_file *s, void *unused)
+{
+	struct msm8953_slim_ctrl *dev = s->private;
+	void __iomem *ngd;
+
+	if (dev->state == MSM8953_SLIM_DOWN) {
+		seq_puts(s, "NGD is DOWN\n");
+		return 0;
+	}
+
+	ngd = ngd_base(dev);
+	seq_printf(s, "NGD_CFG:        0x%08x\n", readl_relaxed(ngd + 0x0));
+	seq_printf(s, "NGD_STATUS:     0x%08x\n", readl_relaxed(ngd + 0x4));
+	seq_printf(s, "NGD_RX_MSGQ_CFG:0x%08x\n", readl_relaxed(ngd + 0x8));
+	seq_printf(s, "NGD_INT_EN:     0x%08x\n", readl_relaxed(ngd + 0x10));
+	seq_printf(s, "NGD_INT_STAT:   0x%08x\n", readl_relaxed(ngd + 0x14));
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(msm8953_slim_ngd_regs);
+
+static int msm8953_slim_msg_log_show(struct seq_file *s, void *unused)
+{
+	struct msm8953_slim_ctrl *dev = s->private;
+	struct {
+		u64 timestamp;
+		u8 dir;
+		u8 len;
+		u8 data[16];
+	} log_copy[SLIM_MSG_LOG_SIZE];
+	unsigned long flags;
+	unsigned int head, i, idx;
+
+	spin_lock_irqsave(&dev->msg_log_lock, flags);
+	memcpy(log_copy, dev->msg_log, sizeof(log_copy));
+	head = dev->msg_log_head;
+	spin_unlock_irqrestore(&dev->msg_log_lock, flags);
+
+	for (i = 0; i < SLIM_MSG_LOG_SIZE; i++) {
+		u64 ts;
+		u8 plen;
+
+		idx = (head + i) % SLIM_MSG_LOG_SIZE;
+		ts = log_copy[idx].timestamp;
+		if (!ts)
+			continue;
+		plen = min_t(u8, log_copy[idx].len, 16);
+		seq_printf(s, "[%llu.%06llu] %s %*ph\n",
+			   ts / 1000000000ULL,
+			   (ts % 1000000000ULL) / 1000ULL,
+			   log_copy[idx].dir ? "RX" : "TX",
+			   plen, log_copy[idx].data);
+	}
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(msm8953_slim_msg_log);
+#endif /* CONFIG_DEBUG_FS */
+
 /* ---- Probe / remove ------------------------------------------------------ */
 
 static int msm8953_slim_probe(struct platform_device *pdev)
@@ -2317,6 +2443,18 @@ static int msm8953_slim_probe(struct platform_device *pdev)
 	schedule_work(&dev->ngd_up_work);
 
 	dev_info(&pdev->dev, "MSM8953 SLIMbus NGD controller registered\n");
+
+#ifdef CONFIG_DEBUG_FS
+	spin_lock_init(&dev->msg_log_lock);
+	dev->debugfs_root = debugfs_create_dir("slimbus-msm8953", NULL);
+	debugfs_create_file("status", 0444, dev->debugfs_root, dev,
+			    &msm8953_slim_status_fops);
+	debugfs_create_file("ngd_regs", 0444, dev->debugfs_root, dev,
+			    &msm8953_slim_ngd_regs_fops);
+	debugfs_create_file("msg_log", 0444, dev->debugfs_root, dev,
+			    &msm8953_slim_msg_log_fops);
+#endif
+
 	return 0;
 
 err_qmi:
@@ -2329,6 +2467,10 @@ err_pm:
 static void msm8953_slim_remove(struct platform_device *pdev)
 {
 	struct msm8953_slim_ctrl *dev = platform_get_drvdata(pdev);
+
+#ifdef CONFIG_DEBUG_FS
+	debugfs_remove_recursive(dev->debugfs_root);
+#endif
 
 	if (dev->notifier)
 		qcom_unregister_ssr_notifier(dev->notifier, &dev->nb);
