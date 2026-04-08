@@ -1199,10 +1199,17 @@ static int slim_rx_mux_put(struct snd_kcontrol *kc,
 	if (wcd->rx_port_value[port_id] == ucontrol->value.enumerated.item[0])
 		return 0;
 
-	wcd->rx_port_value[port_id] = ucontrol->value.enumerated.item[0];
-
-	/* Remove channel from any list it's in before adding it to a new one */
+	/*
+	 * Remove channel(s) added by the OLD mux value before switching.
+	 * Cases 1-4 add rx_chs[port_id], case 5 (AIF_MIX1_PB) adds a
+	 * stereo pair at rx_chs[port_id + 2] and [port_id + 3].
+	 * Remove all possible entries to avoid stale list members.
+	 */
 	list_del_init(&wcd->rx_chs[port_id].list);
+	list_del_init(&wcd->rx_chs[port_id + 2].list);
+	list_del_init(&wcd->rx_chs[port_id + 3].list);
+
+	wcd->rx_port_value[port_id] = ucontrol->value.enumerated.item[0];
 
 	switch (wcd->rx_port_value[port_id]) {
 	case 0:
@@ -1226,12 +1233,15 @@ static int slim_rx_mux_put(struct snd_kcontrol *kc,
 		break;
 	case 5:
 		/*
-		 * AIF_MIX1_PB: use ports at +2 offset from the base port.
-		 * E.g. SLIM RX0 normally uses port 0 (ch 144), but with
-		 * AIF_MIX1_PB it uses port 2 (ch 146), matching downstream
-		 * earpiece path (port 18/19, channel 146/147).
+		 * AIF_MIX1_PB: stereo pair at +2/+3 offset from base port.
+		 * SLIM RX0 + AIF_MIX1_PB → ports 2,3 (hw 18,19) ch 146,147.
+		 * Downstream earpiece uses only SLIM RX0 MUX=AIF_MIX1_PB
+		 * (SLIM RX1 MUX=Off) and gets both channels from this
+		 * single mux selection.
 		 */
 		list_add_tail(&wcd->rx_chs[port_id + 2].list,
+			      &wcd->dai[AIF1_PB].slim_ch_list);
+		list_add_tail(&wcd->rx_chs[port_id + 3].list,
 			      &wcd->dai[AIF1_PB].slim_ch_list);
 		break;
 	default:
