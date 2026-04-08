@@ -6,6 +6,7 @@
 #include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/cleanup.h>
+#include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/wait.h>
 #include <linux/bitops.h>
@@ -336,6 +337,9 @@ struct wcd9335_codec {
 
 	unsigned int rx_port_value[WCD9335_RX_MAX];
 	unsigned int tx_port_value[WCD9335_TX_MAX];
+#ifdef CONFIG_DEBUG_FS
+	struct dentry *debugfs_root;
+#endif
 	int hph_l_gain;
 	int hph_r_gain;
 	u32 rx_bias_count;
@@ -1599,7 +1603,7 @@ static int wcd9335_set_prim_interpolator_rate(struct snd_soc_dai *dai,
 			    (inp2_sel == inp)) {
 				/* rate is in Hz */
 				if ((j == 0) && (rate == 44100))
-					dev_info(
+					dev_dbg(
 						wcd->dev,
 						"Cannot set 44.1KHz on INT0\n");
 				else
@@ -1654,7 +1658,7 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 	cfg->port_mask = 0;
 
 	/* Configure slave interface device */
-	dev_info(wcd->dev, "slim_set_hw_params: dir=%d\n", direction);
+	dev_dbg(wcd->dev, "slim_set_hw_params: dir=%d\n", direction);
 	list_for_each_entry(ch, slim_ch_list, list) {
 		cfg->ch_count++;
 		cfg->port_mask |= BIT(ch->port);
@@ -1833,7 +1837,7 @@ static int wcd9335_hw_params(struct snd_pcm_substream *substream,
 						WCD9335_CDC_TX_PATH_CTL(ch->port),
 						WCD9335_CDC_TX_PATH_CTL_PCM_RATE_MASK,
 						tx_fs_rate);
-					dev_info(wcd->dev,
+					dev_dbg(wcd->dev,
 						 "Set decimator %d rate to %d\n",
 						 ch->port, tx_fs_rate);
 				}
@@ -1899,69 +1903,11 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 		cfg = &dai_data->sconfig;
-		dev_info(wcd->dev,
+		dev_dbg(wcd->dev,
 			 "trigger START: dai=%d stream=%d ports=0x%lx bps=%d rate=%d\n",
 			 dai->id, substream->stream, cfg->port_mask,
 			 cfg->bps, cfg->rate);
 		/* Stream activated in hw_params (before AFE start) */
-		/* Dump critical codec registers — all DAPM should be powered by now */
-		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-			unsigned int v;
-			int r;
-			u8 pv;
-			/* Codec analog/digital registers via regmap (paged) */
-			struct {
-				unsigned int reg;
-				const char *name;
-			} regs[] = {
-				{ WCD9335_ANA_EAR, "ANA_EAR" },
-				{ WCD9335_ANA_RX_SUPPLIES, "ANA_RX_SUPPLIES" },
-				{ WCD9335_ANA_CLK_TOP, "ANA_CLK_TOP" },
-				{ WCD9335_CDC_CLK_RST_CTRL_MCLK_CONTROL, "CDC_MCLK_CTL" },
-				{ WCD9335_CDC_CLK_RST_CTRL_FS_CNT_CONTROL, "CDC_FS_CNT" },
-				{ WCD9335_CDC_RX0_RX_PATH_CTL, "RX0_PATH_CTL" },
-				{ WCD9335_CDC_RX0_RX_PATH_CFG0, "RX0_PATH_CFG0" },
-				{ WCD9335_CDC_RX0_RX_PATH_MIX_CTL, "RX0_PATH_MIX" },
-				{ WCD9335_CDC_RX0_RX_VOL_CTL, "RX0_VOL" },
-				{ WCD9335_CDC_RX0_RX_PATH_SEC0, "RX0_SEC0" },
-				{ WCD9335_CDC_COMPANDER1_CTL0, "COMP1_CTL0" },
-			};
-			int i;
-			for (i = 0; i < ARRAY_SIZE(regs); i++) {
-				v = 0;
-				r = regmap_read(wcd->regmap, regs[i].reg, &v);
-				dev_info(wcd->dev, "REG[%s]=0x%02x (ret=%d)\n",
-					 regs[i].name, v, r);
-			}
-			/* PORT_CFG via raw IFC reads (flat addressing, no paging) */
-			for (i = 0; i < 4; i++) {
-				unsigned short port = 16 + i; /* RX ports 16-19 */
-				pv = 0;
-				r = wcd9335_ifc_read(wcd,
-					WCD9335_SLIM_PGD_RX_PORT_CFG(port), &pv);
-				dev_info(wcd->dev,
-					 "PORT_CFG[%d]=0x%02x (reg=0x%03x ret=%d)\n",
-					 port, pv,
-					 WCD9335_SLIM_PGD_RX_PORT_CFG(port), r);
-			}
-			/* MULTI_CHNL via regmap for ports 18/19 */
-			for (i = 18; i <= 19; i++) {
-				v = 0;
-				r = regmap_read(wcd->regmap,
-					WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(i), &v);
-				dev_info(wcd->dev,
-					 "MULTI_CHNL[%d]=0x%02x (reg=0x%03x ret=%d)\n",
-					 i, v,
-					 WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(i), r);
-			}
-			/* PORT_INT_EN */
-			pv = 0;
-			wcd9335_ifc_read(wcd, WCD9335_SLIM_PGD_PORT_INT_EN0, &pv);
-			dev_info(wcd->dev, "PORT_INT_EN0=0x%02x\n", pv);
-			pv = 0;
-			wcd9335_ifc_read(wcd, WCD9335_SLIM_PGD_PORT_INT_EN0 + 1, &pv);
-			dev_info(wcd->dev, "PORT_INT_EN1=0x%02x\n", pv);
-		}
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
@@ -4841,6 +4787,127 @@ static void wcd9335_codec_init(struct snd_soc_component *component)
 	wcd9335_enable_efuse_sensing(component);
 }
 
+#ifdef CONFIG_DEBUG_FS
+static int wcd9335_debugfs_status_show(struct seq_file *s, void *data)
+{
+	struct wcd9335_codec *wcd = s->private;
+	int i;
+
+	seq_printf(s, "codec laddr: %d\n", wcd->slim->laddr);
+	seq_printf(s, "ifc laddr: %d\n",
+		   wcd->slim_ifc_dev ? wcd->slim_ifc_dev->laddr : -1);
+	seq_printf(s, "mclk_rate: %u\n", wcd->mclk_rate);
+	seq_printf(s, "num_rx_port: %u\n", wcd->num_rx_port);
+	seq_printf(s, "num_tx_port: %u\n", wcd->num_tx_port);
+
+	for (i = 0; i < NUM_CODEC_DAIS; i++) {
+		seq_printf(s, "dai[%d]: ch_list_empty=%d sruntime=%s\n",
+			   i,
+			   list_empty(&wcd->dai[i].slim_ch_list),
+			   wcd->dai[i].sruntime ? "yes" : "no");
+	}
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(wcd9335_debugfs_status);
+
+static int wcd9335_debugfs_ifc_ports_show(struct seq_file *s, void *data)
+{
+	struct wcd9335_codec *wcd = s->private;
+	u8 val;
+	int ret, i;
+
+	if (!wcd->slim_ifc_dev) {
+		seq_puts(s, "IFC device not available\n");
+		return 0;
+	}
+
+	/* PORT_INT_EN: 0x030, 0x031, 0x032 */
+	for (i = 0; i < 3; i++) {
+		unsigned short reg = WCD9335_SLIM_PGD_PORT_INT_EN0 + i;
+
+		val = 0;
+		ret = wcd9335_ifc_read(wcd, reg, &val);
+		if (ret < 0)
+			continue;
+		seq_printf(s, "PORT_INT_EN[%d] (0x%03x): 0x%02x\n",
+			   i, reg, val);
+	}
+
+	/* RX PORT_CFG: registers 0x040 through 0x047 (ports 16-23) */
+	for (i = 0; i < 8; i++) {
+		int port = 16 + i;
+		unsigned short reg = WCD9335_SLIM_PGD_RX_PORT_CFG(port);
+
+		val = 0;
+		ret = wcd9335_ifc_read(wcd, reg, &val);
+		if (ret < 0)
+			continue;
+		seq_printf(s, "PORT_CFG_RX[%d] (0x%03x): 0x%02x\n",
+			   port, reg, val);
+	}
+
+	/* TX PORT_CFG: registers 0x050 through 0x057 (ports 0-7) */
+	for (i = 0; i < 8; i++) {
+		int port = i;
+		unsigned short reg = WCD9335_SLIM_PGD_TX_PORT_CFG(port);
+
+		val = 0;
+		ret = wcd9335_ifc_read(wcd, reg, &val);
+		if (ret < 0)
+			continue;
+		seq_printf(s, "PORT_CFG_TX[%d] (0x%03x): 0x%02x\n",
+			   port, reg, val);
+	}
+
+	/* Port status: register 0x080 */
+	val = 0;
+	ret = wcd9335_ifc_read(wcd, WCD9335_SLIM_PGD_PORT_INT_STATUS(0), &val);
+	if (ret == 0)
+		seq_printf(s, "PORT_STATUS (0x%03x): 0x%02x\n",
+			   WCD9335_SLIM_PGD_PORT_INT_STATUS(0), val);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(wcd9335_debugfs_ifc_ports);
+
+static int wcd9335_debugfs_codec_regs_show(struct seq_file *s, void *data)
+{
+	struct wcd9335_codec *wcd = s->private;
+	unsigned int val;
+	int ret;
+
+	struct {
+		unsigned int reg;
+		const char *name;
+	} regs[] = {
+		{ WCD9335_ANA_EAR, "ANA_EAR" },
+		{ WCD9335_ANA_RX_SUPPLIES, "ANA_RX_SUPPLIES" },
+		{ WCD9335_ANA_CLK_TOP, "ANA_CLK_TOP" },
+		{ WCD9335_CDC_CLK_RST_CTRL_MCLK_CONTROL, "CDC_MCLK_CONTROL" },
+		{ WCD9335_CDC_CLK_RST_CTRL_FS_CNT_CONTROL, "CDC_FS_CNT_CONTROL" },
+		{ WCD9335_CDC_RX0_RX_PATH_CTL, "RX0_PATH_CTL" },
+		{ WCD9335_CDC_RX0_RX_PATH_CFG0, "RX0_PATH_CFG0" },
+		{ WCD9335_CDC_RX0_RX_PATH_MIX_CTL, "RX0_PATH_MIX_CTL" },
+		{ WCD9335_CDC_RX0_RX_VOL_CTL, "RX0_VOL_CTL" },
+		{ WCD9335_CDC_COMPANDER1_CTL0, "COMPANDER1_CTL0" },
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(regs); i++) {
+		val = 0;
+		ret = regmap_read(wcd->regmap, regs[i].reg, &val);
+		if (ret < 0)
+			continue;
+		seq_printf(s, "%-24s (0x%04x): 0x%02x\n",
+			   regs[i].name, regs[i].reg, val);
+	}
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(wcd9335_debugfs_codec_regs);
+#endif /* CONFIG_DEBUG_FS */
+
 static int wcd9335_codec_probe(struct snd_soc_component *component)
 {
 	struct wcd9335_codec *wcd = dev_get_drvdata(component->dev);
@@ -4865,6 +4932,16 @@ static int wcd9335_codec_probe(struct snd_soc_component *component)
 	ret = wcd9335_setup_irqs(wcd);
 	if (ret)
 		goto free_clsh_ctrl;
+
+#ifdef CONFIG_DEBUG_FS
+	wcd->debugfs_root = debugfs_create_dir("wcd9335-slim", NULL);
+	debugfs_create_file("status", 0444, wcd->debugfs_root, wcd,
+			    &wcd9335_debugfs_status_fops);
+	debugfs_create_file("ifc_ports", 0444, wcd->debugfs_root, wcd,
+			    &wcd9335_debugfs_ifc_ports_fops);
+	debugfs_create_file("codec_regs", 0444, wcd->debugfs_root, wcd,
+			    &wcd9335_debugfs_codec_regs_fops);
+#endif
 
 	return 0;
 
