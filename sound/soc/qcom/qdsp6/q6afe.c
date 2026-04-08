@@ -1786,6 +1786,55 @@ static void q6afe_send_cdc_config(struct q6afe *afe)
 			dev_warn(afe->dev, "CDC_REG_CFG_INIT: %d\n", ret);
 	}
 
+	/*
+	 * AFE_PARAM_ID_SLIMBUS_SLAVE_PORT_CFG (0x00010233):
+	 * Tells the ADSP the PGD and IFC device logical addresses so
+	 * the AFE can route audio data to the correct SLIMbus device.
+	 * Without this, the ADSP accepts all control messages but can't
+	 * link the AFE audio output to the codec's PGD ports.
+	 *
+	 * Downstream: tasha_slimbus_slave_port_cfg in wcd9335.c,
+	 * sent via afe_send_slimbus_slave_port_cfg() with
+	 * module_id = AFE_MODULE_HW_MAD.
+	 *
+	 * PGD LA=200, IFC LA=199 (from ADDR_QUERY at boot).
+	 */
+	{
+		struct {
+			u32 minor_version;
+			u16 slimbus_dev_id;
+			u16 slave_dev_pgd_la;
+			u16 slave_dev_intfdev_la;
+			u16 bit_width;
+			u16 data_format;
+			u16 num_channels;
+			u16 slave_port_mapping[8];
+		} __packed slave_port_cfg = {
+			.minor_version = 1,
+			.slimbus_dev_id = 0, /* AFE_SLIMBUS_DEVICE_1 */
+			.slave_dev_pgd_la = 200,
+			.slave_dev_intfdev_la = 199,
+			.bit_width = 16,
+			.data_format = 0,
+			.num_channels = 1,
+			.slave_port_mapping = { 0 },
+		};
+
+#define AFE_MODULE_HW_MAD		0x00010230
+#define AFE_PARAM_ID_SLIMBUS_SLAVE_PORT_CFG 0x00010233
+
+		ret = q6afe_set_param(afe, NULL, &slave_port_cfg,
+				      AFE_PARAM_ID_SLIMBUS_SLAVE_PORT_CFG,
+				      AFE_MODULE_HW_MAD,
+				      sizeof(slave_port_cfg), AFE_CLK_TOKEN);
+		if (ret)
+			dev_warn(afe->dev, "SLIMBUS_SLAVE_PORT_CFG: %d\n", ret);
+		else
+			dev_info(afe->dev, "SLIMBUS_SLAVE_PORT_CFG: OK (pgd_la=%d ifc_la=%d)\n",
+				 slave_port_cfg.slave_dev_pgd_la,
+				 slave_port_cfg.slave_dev_intfdev_la);
+	}
+
 	dev_info(afe->dev, "CDC config sent to ADSP\n");
 }
 
