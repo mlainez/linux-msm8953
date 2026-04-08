@@ -1675,61 +1675,20 @@ static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 	 * Without these, the codec port gets data but can't process it
 	 * (PORT_INT_STATUS shows bit 7 = error condition).
 	 */
-	{
-		u16 payload = 0;
-		int ret2;
-
-		list_for_each_entry(ch, slim_ch_list, list)
-			payload |= 1 << ch->shift;
-
-		i = 0;
-		list_for_each_entry(ch, slim_ch_list, list) {
-			cfg->chs[i++] = ch->ch_num;
-			if (direction == SNDRV_PCM_STREAM_PLAYBACK) {
-				/*
-				 * MULTI_CHNL: tell PGD which channel(s) feed this port.
-				 * Uses regmap (paged access, offset 0x140+).
-				 */
-				ret2 = regmap_write(wcd->regmap,
-					WCD9335_SLIM_PGD_RX_PORT_MULTI_CHNL_0(ch->port),
-					payload);
-				dev_dbg(wcd->dev,
-					"MULTI_CHNL_RX[%d]=0x%x ret=%d\n",
-					ch->port, payload, ret2);
-
-				/*
-				 * PORT_CFG: set watermark + enable.
-				 * Uses IFC flat write (offset 0x40+, within range).
-				 */
-				ret2 = wcd9335_ifc_write(wcd,
-					0x40 + ch->port,
-					WCD9335_SLIM_WATER_MARK_VAL);
-				dev_dbg(wcd->dev,
-					"PORT_CFG[%d]=0x%x ret=%d\n",
-					ch->port,
-					WCD9335_SLIM_WATER_MARK_VAL, ret2);
-			} else {
-				ret2 = regmap_write(wcd->regmap,
-					WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_0(ch->port),
-					payload & 0xFF);
-				dev_dbg(wcd->dev,
-					"MULTI_CHNL_TX0[%d]=0x%x ret=%d\n",
-					ch->port, payload & 0xFF, ret2);
-
-				ret2 = regmap_write(wcd->regmap,
-					WCD9335_SLIM_PGD_TX_PORT_MULTI_CHNL_1(ch->port),
-					(payload >> 8) & 0xFF);
-
-				ret2 = wcd9335_ifc_write(wcd,
-					0x50 + ch->port,
-					WCD9335_SLIM_WATER_MARK_VAL);
-				dev_dbg(wcd->dev,
-					"PORT_CFG_TX[%d]=0x%x ret=%d\n",
-					ch->port,
-					WCD9335_SLIM_WATER_MARK_VAL, ret2);
-			}
-		}
-	}
+	/*
+	 * Do NOT write MULTI_CHNL or PORT_CFG from the kernel.
+	 * The downstream FP3 tasha kernel does not write these — the
+	 * ADSP handles port configuration internally via CDC_REG_CFG
+	 * and CONNECT_SINK processing. The WCD934x writes them from
+	 * the kernel but it uses a separate if_regmap for IFC access
+	 * that the WCD9335 mainline driver doesn't have, and the
+	 * MULTI_CHNL registers at 0x140+ are unreachable via the
+	 * paged regmap (window truncation) or IFC flat addressing
+	 * (elements above 0x900 are dropped).
+	 */
+	i = 0;
+	list_for_each_entry(ch, slim_ch_list, list)
+		cfg->chs[i++] = ch->ch_num;
 
 	dai_data->sruntime = slim_stream_allocate(wcd->slim, "WCD9335-SLIM");
 
