@@ -386,7 +386,7 @@
 		};
 
 		codec {
-			sound-dai = <&wcd9335 AIF1_PB>;
+			sound-dai = <&wcd9335 AIF_MIX1_PB>;
 		};
 	};
 
