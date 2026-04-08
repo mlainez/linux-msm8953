@@ -1753,12 +1753,13 @@ static void q6afe_send_cdc_config(struct q6afe *afe)
 			.minor_version = 1,
 			/*
 			 * WCD9335 PGD EA: manf=0x0217 prod=0x01a0 dev_idx=1 inst=0
-			 * Packed from SLIMbus wire bytes [inst, dev, prod_lo, prod_hi, manf_lo, manf_hi]:
-			 *   ea_lsw = (ea[0]<<24)|(ea[1]<<16)|(ea[2]<<8)|ea[3]
-			 *   ea_msw = (ea[4]<<8)|ea[5]
+			 * Packed as downstream tasha_init_slim_slave_cfg():
+			 *   memcpy(&eaddr, e_addr, 6) on LE → eaddr = 0x0000021701A00100
+			 *   ea_lsw = eaddr & 0xFFFFFFFF = 0x01A00100
+			 *   ea_msw = eaddr >> 32 = 0x0217
 			 */
-			.device_enum_addr_lsw = 0x0001a001,
-			.device_enum_addr_msw = 0x00001702,
+			.device_enum_addr_lsw = 0x01a00100,
+			.device_enum_addr_msw = 0x00000217,
 			.tx_slave_port_offset = 0,
 			.rx_slave_port_offset = 16,
 		};
