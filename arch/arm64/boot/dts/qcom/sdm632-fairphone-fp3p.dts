@@ -583,13 +583,12 @@
 		};
 	};
 
-	/* AK7374 voice coil motor — rear camera autofocus */
+	/* Dongwoon DW9800W voice coil motor — rear camera autofocus.
+	 * Uses register-addressed I2C protocol (reg 0x03 for position). */
 	actuator: camera-lens@c {
-		compatible = "asahi-kasei,ak7374";
+		compatible = "dongwoon,dw9800w";
 		reg = <0x0c>;
-
-		vdd-supply = <&cam_vaf>;
-		vio-supply = <&cam_vio>;
+		vcc-supply = <&cam_vaf>;
 	};
 };
 
