@@ -583,9 +583,9 @@
 	};
 
 	/* AK7374 voice coil motor — rear camera autofocus */
-	actuator: camera-lens@18 {
+	actuator: camera-lens@c {
 		compatible = "asahi-kasei,ak7374";
-		reg = <0x18>;
+		reg = <0x0c>;
 
 		vdd-supply = <&cam_vaf>;
 		vio-supply = <&cam_vio>;
