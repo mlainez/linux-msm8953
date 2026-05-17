@@ -67,6 +67,7 @@
 		gpio = <&tlmm 130 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		startup-delay-us = <10000>;
+		regulator-always-on;
 	};
 
 	/* Rear camera AF actuator supply, active-high enable on GPIO 128 */
