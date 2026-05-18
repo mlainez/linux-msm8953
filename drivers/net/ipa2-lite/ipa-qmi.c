@@ -10,7 +10,6 @@
 #include <linux/stddef.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/mutex.h>
 
 #include "ipa.h"
 
@@ -909,7 +908,6 @@ struct ipa_qmi {
 	const struct ipa_partition *mem_layout;
 	struct qmi_handle client_handle;
 	struct qmi_handle server_handle;
-	struct mutex lock;
 
 	/* Information used for the client handle */
 	struct sockaddr_qrtr modem_sq;
@@ -989,7 +987,7 @@ struct ipa_qmi {
 #define IPA_MODEM_SERVICE_INS_ID	2
 #define IPA_MODEM_SVC_VERS		1
 
-#define QMI_INIT_DRIVER_TIMEOUT		10000	/* A minute in milliseconds */
+#define QMI_INIT_DRIVER_TIMEOUT		60000	/* A minute in milliseconds */
 
 /* Send an INIT_COMPLETE indication message to the modem */
 static void ipa_server_init_complete(struct ipa_qmi *ipa_qmi)
@@ -1050,8 +1048,6 @@ static void ipa_server_bye(struct qmi_handle *qmi, unsigned int node)
 
 	ipa_qmi = container_of(qmi, struct ipa_qmi, server_handle);
 
-	guard(mutex)(&ipa_qmi->lock);
-
 	/* The modem client and server go away at the same time */
 	memset(&ipa_qmi->modem_sq, 0, sizeof(ipa_qmi->modem_sq));
 
@@ -1090,7 +1086,6 @@ static void ipa_server_indication_register(struct qmi_handle *qmi,
 				IPA_QMI_INDICATION_REGISTER_RSP_SZ,
 				ipa_indication_register_rsp_ei, &rsp);
 	if (!ret) {
-		guard(mutex)(&ipa_qmi->lock);
 		ipa_qmi->indication_requested = true;
 		ipa_qmi_ready(ipa_qmi);		/* We might be ready now */
 	} else {
@@ -1196,9 +1191,6 @@ static void ipa_client_init_driver_work(struct work_struct *work)
 	qmi = &ipa_qmi->client_handle;
 	dev = ipa_qmi->dev;
 
-	if (ipa_qmi->modem_ready)
-		return;
-
 	ret = qmi_txn_init(qmi, &txn, NULL, NULL);
 	if (ret < 0) {
 		dev_err(dev, "error %d preparing init driver request\n", ret);
@@ -1219,7 +1211,6 @@ static void ipa_client_init_driver_work(struct work_struct *work)
 	}
 
 	if (!ret) {
-		guard(mutex)(&ipa_qmi->lock);
 		ipa_qmi->modem_ready = true;
 		ipa_qmi_ready(ipa_qmi);		/* We might be ready now */
 	} else {
@@ -1239,8 +1230,6 @@ ipa_client_new_server(struct qmi_handle *qmi, struct qmi_service *svc)
 
 	ipa_qmi = container_of(qmi, struct ipa_qmi, client_handle);
 
-	guard(mutex)(&ipa_qmi->lock);
-
 	ipa_qmi->modem_sq.sq_family = AF_QIPCRTR;
 	ipa_qmi->modem_sq.sq_node = svc->node;
 	ipa_qmi->modem_sq.sq_port = svc->port;
@@ -1254,29 +1243,8 @@ static const struct qmi_ops ipa_client_ops = {
 	.new_server	= ipa_client_new_server,
 };
 
-static void ipa_qmi_release_client(void *ptr)
-{
-	struct ipa_qmi *ipa_qmi = ptr;
-
-	guard(mutex)(&ipa_qmi->lock);
-	disable_work_sync(&ipa_qmi->init_driver_work);
-
-	qmi_handle_release(&ipa_qmi->client_handle);
-	memset(&ipa_qmi->client_handle, 0, sizeof(ipa_qmi->client_handle));
-}
-
-static void ipa_qmi_release_server(void *ptr)
-{
-	struct ipa_qmi *ipa_qmi = ptr;
-
-	guard(mutex)(&ipa_qmi->lock);
-	qmi_handle_release(&ipa_qmi->server_handle);
-	memset(&ipa_qmi->server_handle, 0, sizeof(ipa_qmi->server_handle));
-}
-
 /* Set up for QMI message exchange */
-struct ipa_qmi *ipa_qmi_setup(struct device *dev, const struct ipa_partition *layout,
-		bool loaded)
+struct ipa_qmi *ipa_qmi_setup(struct device *dev, const struct ipa_partition *layout)
 {
 	struct ipa_qmi *ipa_qmi;
 	int ret;
@@ -1285,14 +1253,8 @@ struct ipa_qmi *ipa_qmi_setup(struct device *dev, const struct ipa_partition *la
 	if (!ipa_qmi)
 		return ERR_PTR(-ENOMEM);
 
-	INIT_WORK(&ipa_qmi->init_driver_work, ipa_client_init_driver_work);
-
-	mutex_init(&ipa_qmi->lock);
-
 	ipa_qmi->dev = dev;
-	ipa_qmi->initial_boot = !loaded;
-	ipa_qmi->modem_ready = loaded;
-	ipa_qmi->uc_loaded = loaded;
+	ipa_qmi->initial_boot = true;
 	ipa_qmi->mem_layout = layout;
 
 	/* The server handle is used to handle the DRIVER_INIT_COMPLETE
@@ -1305,17 +1267,12 @@ struct ipa_qmi *ipa_qmi_setup(struct device *dev, const struct ipa_partition *la
 			      IPA_QMI_SERVER_MAX_RCV_SZ, &ipa_server_ops,
 			      ipa_server_msg_handlers);
 	if (ret)
-		return ERR_PTR(ret);
+		goto err_free;
 
-	ret = devm_add_action_or_reset(ipa_qmi->dev, ipa_qmi_release_server, ipa_qmi);
-	if (ret)
-		return ERR_PTR(ret);
-
-	/* We need this ready before the service lookup is added */
 	ret = qmi_add_server(&ipa_qmi->server_handle, IPA_HOST_SERVICE_SVC_ID,
 			     IPA_HOST_SVC_VERS, IPA_HOST_SERVICE_INS_ID);
 	if (ret)
-		return ERR_PTR(ret);
+		goto err_server_handle_release;
 
 	/* The client handle is only used for sending an INIT_DRIVER request
 	 * to the modem, and receiving its response message.
@@ -1323,20 +1280,31 @@ struct ipa_qmi *ipa_qmi_setup(struct device *dev, const struct ipa_partition *la
 	ret = qmi_handle_init(&ipa_qmi->client_handle,
 			      IPA_QMI_CLIENT_MAX_RCV_SZ, &ipa_client_ops,
 			      ipa_client_msg_handlers);
-
-	ret = devm_add_action_or_reset(ipa_qmi->dev, ipa_qmi_release_client, ipa_qmi);
 	if (ret)
-		return ERR_PTR(ret);
+		goto err_server_handle_release;
+
+	/* We need this ready before the service lookup is added */
+	INIT_WORK(&ipa_qmi->init_driver_work, ipa_client_init_driver_work);
 
 	ret = qmi_add_lookup(&ipa_qmi->client_handle, IPA_MODEM_SERVICE_SVC_ID,
 			     IPA_MODEM_SVC_VERS, IPA_MODEM_SERVICE_INS_ID);
 	if (ret)
-		return ERR_PTR(ret);
-
-	if (loaded)
-		ipa_qmi_uc_loaded(ipa_qmi);
+		goto err_client_handle_release;
 
 	return ipa_qmi;
+
+err_client_handle_release:
+	/* Releasing the handle also removes registered lookups */
+	qmi_handle_release(&ipa_qmi->client_handle);
+	memset(&ipa_qmi->client_handle, 0, sizeof(ipa_qmi->client_handle));
+err_server_handle_release:
+	/* Releasing the handle also removes registered services */
+	qmi_handle_release(&ipa_qmi->server_handle);
+	memset(&ipa_qmi->server_handle, 0, sizeof(ipa_qmi->server_handle));
+err_free:
+	devm_kfree(dev, ipa_qmi);
+
+	return ERR_PTR(ret);
 }
 
 /* With IPA v2 modem is not required to send DRIVER_INIT_COMPLETE request to AP.
@@ -1344,7 +1312,6 @@ struct ipa_qmi *ipa_qmi_setup(struct device *dev, const struct ipa_partition *la
  */
 void ipa_qmi_uc_loaded(struct ipa_qmi *ipa_qmi)
 {
-	guard(mutex)(&ipa_qmi->lock);
 	ipa_qmi->uc_loaded = true;
 	ipa_qmi_ready(ipa_qmi);
 }
@@ -1352,4 +1319,16 @@ void ipa_qmi_uc_loaded(struct ipa_qmi *ipa_qmi)
 bool ipa_qmi_is_modem_ready(struct ipa_qmi *ipa_qmi)
 {
 	return ipa_qmi->modem_ready;
+}
+
+/* Tear down IPA QMI handles */
+void ipa_qmi_teardown(struct ipa_qmi *ipa_qmi)
+{
+	cancel_work_sync(&ipa_qmi->init_driver_work);
+
+	qmi_handle_release(&ipa_qmi->client_handle);
+	memset(&ipa_qmi->client_handle, 0, sizeof(ipa_qmi->client_handle));
+
+	qmi_handle_release(&ipa_qmi->server_handle);
+	memset(&ipa_qmi->server_handle, 0, sizeof(ipa_qmi->server_handle));
 }
