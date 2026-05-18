@@ -1021,6 +1021,12 @@ static void ipa_server_init_complete(struct ipa_qmi *ipa_qmi)
  */
 static void ipa_qmi_ready(struct ipa_qmi *ipa_qmi)
 {
+	dev_info(ipa_qmi->dev,
+		 "ipa_qmi_ready: modem_ready=%d uc_loaded=%d ind_req=%d ind_sent=%d initial=%d\n",
+		 ipa_qmi->modem_ready, ipa_qmi->uc_loaded,
+		 ipa_qmi->indication_requested, ipa_qmi->indication_sent,
+		 ipa_qmi->initial_boot);
+
 	/* We aren't ready until the modem and microcontroller are */
 	if (!ipa_qmi->modem_ready || !ipa_qmi->uc_loaded)
 		return;
@@ -1038,6 +1044,7 @@ static void ipa_qmi_ready(struct ipa_qmi *ipa_qmi)
 		ipa_qmi->initial_boot = false;
 	}
 
+	dev_info(ipa_qmi->dev, "ipa_qmi: data plane attached, modem present\n");
 	ipa_modem_set_present(ipa_qmi->dev, true);
 }
 
@@ -1082,6 +1089,7 @@ static void ipa_server_indication_register(struct qmi_handle *qmi,
 	rsp.rsp.result = QMI_RESULT_SUCCESS_V01;
 	rsp.rsp.error = QMI_ERR_NONE_V01;
 
+	dev_info(ipa_qmi->dev, "ipa_qmi: got INDICATION_REGISTER from modem\n");
 	ret = qmi_send_response(qmi, sq, txn, IPA_QMI_INDICATION_REGISTER,
 				IPA_QMI_INDICATION_REGISTER_RSP_SZ,
 				ipa_indication_register_rsp_ei, &rsp);
@@ -1199,6 +1207,7 @@ static void ipa_client_init_driver_work(struct work_struct *work)
 
 	/* Send the request, and if successful wait for its response */
 	init_modem_driver_req(ipa_qmi, &req);
+	dev_info(dev, "ipa_qmi: sending INIT_DRIVER request to modem\n");
 	ret = qmi_send_request(qmi, &ipa_qmi->modem_sq, &txn,
 			       IPA_QMI_INIT_DRIVER, IPA_QMI_INIT_DRIVER_REQ_SZ,
 			       ipa_init_modem_driver_req_ei, &req);
@@ -1208,6 +1217,8 @@ static void ipa_client_init_driver_work(struct work_struct *work)
 		ret = qmi_txn_wait(&txn, timeout);
 		if (ret)
 			dev_err(dev, "error %d awaiting init driver response\n", ret);
+		else
+			dev_info(dev, "ipa_qmi: INIT_DRIVER response received\n");
 	}
 
 	if (!ret) {
@@ -1229,6 +1240,10 @@ ipa_client_new_server(struct qmi_handle *qmi, struct qmi_service *svc)
 	struct ipa_qmi *ipa_qmi;
 
 	ipa_qmi = container_of(qmi, struct ipa_qmi, client_handle);
+
+	dev_info(ipa_qmi->dev,
+		 "ipa_qmi: modem IPA service appeared (node=%u port=%u)\n",
+		 svc->node, svc->port);
 
 	ipa_qmi->modem_sq.sq_family = AF_QIPCRTR;
 	ipa_qmi->modem_sq.sq_node = svc->node;
@@ -1312,6 +1327,7 @@ err_free:
  */
 void ipa_qmi_uc_loaded(struct ipa_qmi *ipa_qmi)
 {
+	dev_info(ipa_qmi->dev, "ipa_qmi: microcontroller loaded\n");
 	ipa_qmi->uc_loaded = true;
 	ipa_qmi_ready(ipa_qmi);
 }
