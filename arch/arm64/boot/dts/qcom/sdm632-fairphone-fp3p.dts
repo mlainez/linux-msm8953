@@ -67,7 +67,8 @@
 		regulator-max-microvolt = <1800000>;
 		gpio = <&tlmm 130 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
-		startup-delay-us = <200>;
+		startup-delay-us = <10000>;
+		regulator-always-on;
 	};
 
 	/* Rear camera AF actuator supply, active-high enable on GPIO 128 */
@@ -78,7 +79,7 @@
 		regulator-max-microvolt = <2850000>;
 		gpio = <&tlmm 128 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
-		startup-delay-us = <200>;
+		startup-delay-us = <10000>;
 	};
 
 	/* Front camera DVDD, active-high enable on GPIO 46 */
@@ -595,13 +596,12 @@
 		};
 	};
 
-	/* AK7374 voice coil motor — rear camera autofocus */
-	actuator: camera-lens@18 {
-		compatible = "asahi-kasei,ak7374";
-		reg = <0x18>;
-
-		vdd-supply = <&cam_vaf>;
-		vio-supply = <&cam_vio>;
+	/* Dongwoon DW9800W voice coil motor — rear camera autofocus.
+	 * Uses register-addressed I2C protocol (reg 0x03 for position). */
+	actuator: camera-lens@c {
+		compatible = "dongwoon,dw9800w";
+		reg = <0x0c>;
+		vcc-supply = <&cam_vaf>;
 	};
 };
 
