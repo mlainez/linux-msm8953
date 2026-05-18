@@ -1223,13 +1223,9 @@ static int ipa_probe(struct platform_device *pdev)
 	if (IS_ERR(ipa->qmi))
 		return PTR_ERR(ipa->qmi);
 
-	dev_info(dev, "ipa_probe: smem_uc_loaded[0] = 0x%08x (sentinel=0x10ADEDFF)\n",
-		 ipa->smem_uc_loaded[0]);
-
 	if (ipa->smem_uc_loaded[0] == 0x10ADEDFF)
 		ipa_qmi_uc_loaded(ipa->qmi);
 
-	dev_info(dev, "ipa_probe: complete, awaiting modem QMI handshake\n");
 	return devm_add_action_or_reset(dev, action_ipa_qmi_teardown, ipa);
 }
 
