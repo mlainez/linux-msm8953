@@ -312,6 +312,16 @@
 };
 
 
+&pmi632_adc {
+	channel@4a {
+		reg = <ADC5_BAT_THERM_100K_PU>;
+		qcom,hw-settle-time = <200>;
+		qcom,pre-scaling = <1 1>;
+		qcom,ratiometric;
+		label = "batt_therm";
+	};
+};
+
 &pmi632_qg {
 	monitored-battery = <&battery>;
 	power-supplies = <&pmi632_charger>;
