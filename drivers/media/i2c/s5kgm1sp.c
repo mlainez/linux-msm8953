@@ -150,36 +150,14 @@ static const struct s5kgm1sp_mode s5kgm1sp_supported_modes[] = {
 			.height = 6000,
 		},
 	},
-	{
-		.width = 2000,
-		.height = 1500,
-		.vts_def = 3196,
-		.vts_min = 3196,
-		.llp = 5024,
-		.link_freq_index = 0,
-		.reg_list = REGS(s5kgm1sp_mode_2000x1500_30fps_regs),
-		.crop = {
-			.left = 8,
-			.top = 8,
-			.width = 8000,
-			.height = 6000,
-		},
-	},
-	{
-		.width = 2000,
-		.height = 1500,
-		.vts_def = 1598,
-		.vts_min = 1598,
-		.llp = 5024,
-		.link_freq_index = 0,
-		.reg_list = REGS(s5kgm1sp_mode_2000x1500_60fps_regs),
-		.crop = {
-			.left = 8,
-			.top = 8,
-			.width = 8000,
-			.height = 6000,
-		},
-	},
+	/* 2x2-binned modes. The non-ybin 2000x1500 variants the vendor
+	 * BSP also defines do 2x horizontal binning + 2x vertical
+	 * row-skipping (BINNING_MODE = 0x0112), which corrupts the
+	 * SGRBG bayer phase and produces unusable output (visible as
+	 * red/blue horizontal banding). They have been dropped here so
+	 * v4l2_find_nearest_size never selects them for 2000x1500.
+	 * The remaining ybin variants do true 2x2 photon-domain
+	 * binning (BINNING_MODE = 0x0122). */
 	{
 		.width = 2000,
 		.height = 1500,
