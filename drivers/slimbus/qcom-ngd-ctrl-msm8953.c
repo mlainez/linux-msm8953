@@ -91,6 +91,9 @@
 #define DEF_BLKSZ	3  /* 4-byte blocks */
 #define DEF_TRANSZ	0  /* default */
 
+/* WCD9335 codec port numbering — RX ports start at 16 */
+#define WCD9335_RX_START	16
+
 /* NGD registers (relative to NGD base) */
 #define QCOM_SLIM_NGD_DESC_NUM	32
 
@@ -162,8 +165,9 @@
 #define MSM_SAT_SUCCSS	0x20
 
 /* User-defined message codes */
-#define SLIM_USR_MC_MASTER_CAPABILITY	0x0
-#define SLIM_USR_MC_REPORT_SATELLITE	0x1
+#define SLIM_USR_MC_MASTER_CAPABILITY		0x0
+#define SLIM_USR_MC_REPEAT_CHANGE_VALUE		0x0
+#define SLIM_USR_MC_REPORT_SATELLITE		0x1
 #define SLIM_USR_MC_ADDR_QUERY		0xD
 #define SLIM_USR_MC_ADDR_REPLY		0xE
 #define SLIM_USR_MC_DEFINE_CHAN		0x20
@@ -342,13 +346,23 @@ struct msm8953_slim_ctrl {
 	int err;
 	atomic_t ssr_in_progress;
 
+	/*
+	 * SSR generation counter: incremented on every DOWN event,
+	 * captured by UP before scheduling recovery work.  The worker
+	 * checks whether the generation still matches — if it doesn't,
+	 * a newer DOWN has arrived and this recovery attempt is stale.
+	 */
+	atomic_t ssr_gen;
+	u32 ngd_up_gen;  /* generation captured by the UP handler */
+	u32 mcap_gen;    /* ssr_gen expected by current MCAP waiter */
+
 	/* QMI */
 	struct qmi_handle qmi;
 	struct sockaddr_qrtr qmi_svc_info;
 	struct completion qmi_up;
 
 	/* Work items */
-	struct work_struct ngd_up_work;
+	struct delayed_work ngd_up_work;
 	struct work_struct slave_notify_work;
 	struct notifier_block nb;
 	void *notifier;
@@ -433,33 +447,46 @@ static void msm8953_slim_dma_tx_cb(void *arg)
 	}
 }
 
-/* DMA engine TX: send message via ADSP-configured BAM pipe */
+/*
+ * BAM v1.7.0 pipe register offsets (also used in arm_data_pipe below).
+ * Needed here for the direct TX descriptor write path.
+ */
+#define BAM17_P_CTRL(p)		(0x13000 + (p) * 0x1000)
+#define BAM17_P_DESC_FIFO_ADDR(p) (0x1381C + (p) * 0x1000)
+#define BAM17_P_FIFO_SIZES(p)	(0x13820 + (p) * 0x1000)
+#define BAM17_P_EVNT_REG(p)	(0x13818 + (p) * 0x1000)
+
+/* Send message via BAM TX pipe */
 static int msm8953_slim_bam_tx(struct msm8953_slim_ctrl *dev,
 			       u32 *buf, u8 len)
 {
-	struct dma_async_tx_descriptor *desc;
-
-	if (!dev->use_bam_tx || !dev->dma_tx_channel)
+	if (!dev->use_bam_tx)
 		return -ENODEV;
 
 	len = (len + 3) & 0xfc;
 	memcpy(dev->tx_base, buf, len);
 
-	desc = dmaengine_prep_slave_single(dev->dma_tx_channel,
-					   dev->tx_phys_base, len,
-					   DMA_MEM_TO_DEV,
-					   DMA_PREP_INTERRUPT);
-	if (!desc) {
-		dev_err(dev->dev, "DMA TX prep failed\n");
-		return -ENOMEM;
+	if (dev->dma_tx_channel) {
+		struct dma_async_tx_descriptor *desc;
+
+		desc = dmaengine_prep_slave_single(dev->dma_tx_channel,
+						   dev->tx_phys_base, len,
+						   DMA_MEM_TO_DEV,
+						   DMA_PREP_INTERRUPT);
+		if (!desc) {
+			dev_err(dev->dev, "DMA TX prep failed\n");
+			return -ENOMEM;
+		}
+
+		desc->callback = msm8953_slim_dma_tx_cb;
+		desc->callback_param = dev;
+		desc->cookie = dmaengine_submit(desc);
+		dma_async_issue_pending(dev->dma_tx_channel);
+
+		return 0;
 	}
 
-	desc->callback = msm8953_slim_dma_tx_cb;
-	desc->callback_param = dev;
-	desc->cookie = dmaengine_submit(desc);
-	dma_async_issue_pending(dev->dma_tx_channel);
-
-	return 0;
+	return -ENODEV;
 }
 
 /* AHB-based TX: write message words directly to NGD_TX_MSG register */
@@ -501,6 +528,12 @@ static void msm8953_slim_rx(struct msm8953_slim_ctrl *dev, u8 *buf)
 	/* MASTER_CAPABILITY: signal the power-up completion */
 	if (mc == SLIM_USR_MC_MASTER_CAPABILITY &&
 	    mt == SLIM_MSG_MT_SRC_REFERRED_USER) {
+		if (dev->mcap_gen != (u32)atomic_read(&dev->ssr_gen)) {
+			dev_info(dev->dev,
+				 "MCAP ignored: stale gen %u (current %d)\n",
+				 dev->mcap_gen, atomic_read(&dev->ssr_gen));
+			return;
+		}
 		dev_info(dev->dev, "SLIM SAT: Rcvd master capability\n");
 		complete(&dev->reconf);
 		return;
@@ -588,8 +621,8 @@ static irqreturn_t msm8953_slim_interrupt(int irq, void *d)
 			dev->err = -EINVAL;
 		else
 			dev->err = -EIO;
-		dev_warn(dev->dev, "NGD interrupt error: 0x%x err:%d\n",
-			 stat, dev->err);
+		dev_warn_ratelimited(dev->dev, "NGD interrupt error: 0x%x err:%d\n",
+				     stat, dev->err);
 		mb();
 		if (dev->wr_comp) {
 			struct completion *comp = dev->wr_comp;
@@ -808,7 +841,7 @@ static void msm8953_slim_rx_msgq_cb(void *args)
 	dma_async_issue_pending(dev->dma_rx_channel);
 }
 
-static void msm8953_slim_ngd_setup(struct msm8953_slim_ctrl *dev);
+static int msm8953_slim_ngd_setup(struct msm8953_slim_ctrl *dev);
 
 static int msm8953_slim_init_dma(struct msm8953_slim_ctrl *dev)
 {
@@ -857,16 +890,13 @@ static int msm8953_slim_init_dma(struct msm8953_slim_ctrl *dev)
 	dma_async_issue_pending(dev->dma_rx_channel);
 
 	/*
-	 * Set up TX via DMA engine. The ADSP configures BAM pipe 4
-	 * when it sees TX_MSGQ_EN in NGD_CFG. BAM EE access control
-	 * blocks AP writes to LPASS-owned pipes, so we MUST use the
-	 * DMA engine (which uses the ADSP-configured pipe) rather
-	 * than writing pipe registers directly.
+	 * TX messaging via DMA engine. The DMA engine resets BAM pipe 4
+	 * and reconfigures it with a 32KB descriptor FIFO. This may
+	 * differ from the ADSP's original 264-byte FIFO configuration.
 	 */
-
 	dev->dma_tx_channel = dma_request_chan(dev->dev, "tx");
 	if (IS_ERR(dev->dma_tx_channel)) {
-		dev_warn(dev->dev, "TX DMA channel not available, using AHB TX\n");
+		dev_warn(dev->dev, "TX DMA not available, using AHB TX\n");
 		dev->dma_tx_channel = NULL;
 		goto skip_bam_tx;
 	}
@@ -931,11 +961,8 @@ static void msm8953_slim_teardown_dma(struct msm8953_slim_ctrl *dev)
  * (which are only used for messaging pipes 3/4).
  * v1.7.0: base = 0x13000, stride = 0x1000 per pipe.
  */
-#define BAM17_P_CTRL(p)		(0x13000 + (p) * 0x1000)
 #define BAM17_P_RST(p)		(0x13004 + (p) * 0x1000)
 #define BAM17_P_IRQ_EN(p)	(0x13018 + (p) * 0x1000)
-#define BAM17_P_DESC_FIFO_ADDR(p) (0x1381C + (p) * 0x1000)
-#define BAM17_P_FIFO_SIZES(p)	(0x13820 + (p) * 0x1000)
 #define BAM17_IRQ_SRCS_MSK_EE(ee) (0x03004 + (ee) * 0x1000)
 
 static int msm8953_slim_arm_data_pipe(struct msm8953_slim_ctrl *dev,
@@ -1087,10 +1114,23 @@ static int msm8953_slim_enable_pgd_port(struct msm8953_slim_ctrl *dev,
 	return 0;
 }
 
-static void msm8953_slim_ngd_setup(struct msm8953_slim_ctrl *dev)
+/*
+ * msm8953_slim_ngd_setup - program NGD registers and enable the controller
+ *
+ * After the ADSP crashes and restarts, it resets the SLIMbus hardware block.
+ * If we write NGD_CFG while the ADSP is still resetting SLIMbus, the write
+ * doesn't stick (reads back as 0x0).  This function polls NGD_CFG after
+ * writing it, waiting for the ADSP to release the hardware from reset.
+ *
+ * Returns 0 on success, -EAGAIN if NGD_CFG never took effect (caller should
+ * retry the entire power-up sequence after a delay).
+ */
+static int msm8953_slim_ngd_setup(struct msm8953_slim_ctrl *dev)
 {
 	void __iomem *ngd = ngd_base(dev);
-	u32 rx_msgq;
+	u32 rx_msgq, cfg_readback;
+	u32 cfg_val = NGD_CFG_ENABLE | NGD_CFG_RX_MSGQ_EN | NGD_CFG_TX_MSGQ_EN;
+	int i;
 
 	writel_relaxed(DEF_NGD_INT_MASK, ngd + NGD_INT_EN);
 
@@ -1102,18 +1142,41 @@ static void msm8953_slim_ngd_setup(struct msm8953_slim_ctrl *dev)
 	 * Enable both RX and TX MSGQ. The ADSP needs to see TX_MSGQ_EN
 	 * to set up the BAM TX pipe. REPORT_SATELLITE temporarily
 	 * disables TX_MSGQ_EN to send via AHB.
+	 *
+	 * Poll NGD_CFG after writing: if the ADSP is still resetting the
+	 * SLIMbus hardware, writes are silently dropped (readback = 0).
+	 * Give it up to ~50ms (10 x 5ms) for the ADSP to release the
+	 * block from reset.
 	 */
-	writel_relaxed(NGD_CFG_ENABLE | NGD_CFG_RX_MSGQ_EN |
-		       NGD_CFG_TX_MSGQ_EN,
-		       ngd + NGD_CFG);
-	mb();
+	for (i = 0; i < 10; i++) {
+		writel_relaxed(cfg_val, ngd + NGD_CFG);
+		mb();
+
+		cfg_readback = readl_relaxed(ngd + NGD_CFG);
+		if (cfg_readback == cfg_val)
+			break;
+
+		dev_dbg(dev->dev,
+			"NGD_CFG write didn't stick (attempt %d, read=0x%x), waiting\n",
+			i, cfg_readback);
+		usleep_range(5000, 6000);
+	}
 
 	dev_dbg(dev->dev,
 		 "NGD setup: cfg=0x%x int_en=0x%x rxmsgq=0x%x stat=0x%x\n",
-		 readl_relaxed(ngd + NGD_CFG),
+		 cfg_readback,
 		 readl_relaxed(ngd + NGD_INT_EN),
 		 readl_relaxed(ngd + NGD_RX_MSGQ_CFG),
 		 readl_relaxed(ngd + NGD_STATUS));
+
+	if (cfg_readback != cfg_val) {
+		dev_warn(dev->dev,
+			 "NGD_CFG stuck at 0x%x after %d retries (ADSP SLIMbus not ready)\n",
+			 cfg_readback, i);
+		return -EAGAIN;
+	}
+
+	return 0;
 }
 
 static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
@@ -1177,7 +1240,7 @@ static int msm8953_slim_xfer_msg_sync(struct slim_controller *ctrl,
 			slim_free_txn_tid(ctrl, txn);
 			return -ETIMEDOUT;
 		}
-		dev_dbg(ctrl->dev, "USR msg ACK OK: mc=0x%x tid=%d\n",
+		dev_info(ctrl->dev, "USR msg ACK OK: mc=0x%x tid=%d\n",
 			 txn->mc, txn->tid);
 	}
 
@@ -1263,19 +1326,114 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 			}
 			wbuf[txn.msg->num_bytes++] = txn.tid;
 
-			dev_dbg(ctrl->dev,
-				 "DEF_ACT_CHAN bytes: [%02x %02x %02x %02x TID=%d] coef=%d exp=%d prrate=%d\n",
-				 wbuf[0], wbuf[1], wbuf[2], wbuf[3],
-				 txn.tid, coef, exp, port->ch.prrate);
+		dev_info(ctrl->dev,
+			 "DEF_ACT_CHAN bytes: [%02x %02x %02x %02x TID=%d] coef=%d exp=%d prrate=%d\n",
+			 wbuf[0], wbuf[1], wbuf[2], wbuf[3],
+			 txn.tid, coef, exp, port->ch.prrate);
 		}
 		wbuf[txn.msg->num_bytes++] = port->ch.id;
+	}
+
+	/*
+	 * Do NOT send CORE NEXT_DEFINE_CHANNEL here — the ADSP satellite
+	 * dispatcher drops all CORE messages (verified via firmware RE at
+	 * 0xf04ca424). DEF_ACT_CHAN (USR mc=0x21) below both defines and
+	 * activates the channel in the ADSP's internal state machine.
+	 */
+
+	/*
+	 * Send REQ_BW (mc=0x28) to request bandwidth allocation from the
+	 * ADSP master. Without this, the ADSP creates channels via
+	 * DEF_ACT_CHAN but never allocates bus frame slots for them,
+	 * leaving data stuck in PGD port FIFOs (overflow state).
+	 */
+	{
+		u8 bbuf[4];
+		struct slim_val_inf bmsg = {0, 3, NULL, bbuf, NULL};
+		struct slim_msg_txn btxn = {0};
+		DECLARE_COMPLETION_ONSTACK(bdone);
+
+		btxn.mt = SLIM_MSG_MT_DEST_REFERRED_USER;
+		btxn.dt = SLIM_MSG_DEST_LOGICALADDR;
+		btxn.la = SLIM_LA_MGR;
+		btxn.mc = SLIM_USR_MC_REQ_BW;
+		btxn.msg = &bmsg;
+
+		/*
+		 * REQ_BW format (downstream ngd_allocbw):
+		 * byte 0: (laddr & 0x1f) | ((pending_msgsl & 0x7) << 5)
+		 * byte 1: (pending_msgsl >> 3)
+		 * byte 2: TID
+		 *
+		 * pending_msgsl is the number of messaging slots needed.
+		 * For simple audio playback, request minimum slots (8).
+		 */
+		bbuf[0] = (sdev->laddr & 0x1f) | ((8 & 0x7) << 5);
+		bbuf[1] = (8 >> 3);
+
+		ret = slim_alloc_txn_tid(ctrl, &btxn);
+		if (ret)
+			return ret;
+		bbuf[2] = btxn.tid;
+		bmsg.num_bytes = 3;
+		btxn.rl = bmsg.num_bytes + 4;
+		btxn.comp = &bdone;
+
+		dev_info(ctrl->dev, "REQ_BW: [%02x %02x tid=%d]\n",
+			 bbuf[0], bbuf[1], btxn.tid);
+
+		ret = msm8953_slim_xfer_msg_sync(ctrl, &btxn);
+		if (ret) {
+			slim_free_txn_tid(ctrl, &btxn);
+			dev_warn(&sdev->dev, "REQ_BW failed: %d\n", ret);
+		}
+	}
+
+	/*
+	 * RECONFIG_NOW to commit the REQ_BW bandwidth reservation.
+	 * Without this the ADSP never allocates bus frame slots for
+	 * the channels that DEF_ACT_CHAN is about to activate, and
+	 * data sits in PGD port FIFOs forever (OVERFLOW, PORT_STATUS=0).
+	 * Matches downstream ngd_allocbw sequence:
+	 *   REQ_BW -> RECONFIG_NOW -> DEF_ACT_CHAN -> RECONFIG_NOW.
+	 */
+	{
+		u8 rbw_buf[2];
+		struct slim_val_inf rbw_msg = {0, 2, NULL, rbw_buf, NULL};
+		struct slim_msg_txn rbw_txn = {0};
+		DECLARE_COMPLETION_ONSTACK(rbw_done);
+
+		rbw_txn.mt = SLIM_MSG_MT_DEST_REFERRED_USER;
+		rbw_txn.dt = SLIM_MSG_DEST_LOGICALADDR;
+		rbw_txn.la = SLIM_LA_MGR;
+		rbw_txn.mc = SLIM_USR_MC_RECONFIG_NOW;
+		rbw_txn.msg = &rbw_msg;
+
+		rbw_buf[1] = sdev->laddr;
+
+		ret = slim_alloc_txn_tid(ctrl, &rbw_txn);
+		if (ret)
+			return ret;
+		rbw_buf[0] = rbw_txn.tid;
+		rbw_txn.rl = rbw_msg.num_bytes + 4;
+		rbw_txn.comp = &rbw_done;
+
+		dev_info(ctrl->dev, "REQ_BW RECONFIG_NOW: tid=%d laddr=0x%x\n",
+			 rbw_txn.tid, sdev->laddr);
+
+		ret = msm8953_slim_xfer_msg_sync(ctrl, &rbw_txn);
+		if (ret) {
+			slim_free_txn_tid(ctrl, &rbw_txn);
+			dev_warn(&sdev->dev,
+				 "REQ_BW RECONFIG_NOW failed: %d\n", ret);
+		}
 	}
 
 	txn.mc = SLIM_USR_MC_DEF_ACT_CHAN;
 	txn.rl = txn.msg->num_bytes + 4;
 	txn.comp = &done;
 
-	dev_dbg(ctrl->dev,
+	dev_info(ctrl->dev,
 		 "enable_stream: DEF_ACT_CHAN laddr=0x%x nports=%d bps=%d prot=%d\n",
 		 sdev->laddr, rt->num_ports, rt->bps, rt->prot);
 
@@ -1309,16 +1467,19 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 	}
 
 	/*
-	 * No BAM pipe arming or PGD port enable needed here.
-	 * Downstream's msm_slim_connect_pipe_port() is only called when
-	 * wbuf[0] == pgdla (0xFF), which is FALSE for codec audio CONNECTs
-	 * (codec LA=200). The ADSP manages audio data pipes autonomously
-	 * through its own BAM pipes (EE0, pipes 3-19).
-	 * apps_pipes=0x600000 (pipes 21/22) are for non-audio uses (MAD).
+	 * Do NOT send CORE BEGIN_RECONFIG / DEFINE_CONTENT / ACTIVATE /
+	 * RECONFIGURE_NOW via raw BAM TX. Verified by ADSP firmware RE:
+	 * the satellite dispatcher drops all CORE messages. The NGD
+	 * hardware emits the BAM buffer as a bus frame, but nothing on
+	 * the bus processes these MCs — they are bus-manager-addressed
+	 * messages and the ADSP is the sole manager.
+	 *
+	 * The USR DEF_ACT_CHAN + RECONFIG_NOW pair above is the full
+	 * sequence required — the ADSP internally schedules transport.
 	 */
-
 	return 0;
 }
+
 
 /* ---- REPORT_SATELLITE send ---------------------------------------------- */
 
@@ -1331,6 +1492,10 @@ static int msm8953_slim_report_satellite(struct msm8953_slim_ctrl *dev)
 	int ret;
 
 retry:
+	if (atomic_read(&dev->ssr_in_progress)) {
+		dev_info(dev->dev, "REPORT_SAT: SSR in progress, aborting\n");
+		return -ENODEV;
+	}
 	memset(buf, 0, sizeof(buf));
 
 	/*
@@ -1438,12 +1603,14 @@ static int msm8953_slim_power_up(struct msm8953_slim_ctrl *dev)
 	void __iomem *ngd;
 	int timeout, ret = 0;
 	u32 laddr;
+	int mcap_retries = 0;
 
 	ret = msm8953_slim_qmi_power_request(dev, true);
 	if (ret) {
-		dev_err(dev->dev, "SLIM power req failed: %d\n", ret);
+		dev_err(dev->dev, "SLIM QMI PM_ACTIVE failed: %d\n", ret);
 		return ret;
 	}
+	dev_info(dev->dev, "SLIM QMI PM_ACTIVE sent OK\n");
 
 	ngd = ngd_base(dev);
 	laddr = readl_relaxed(ngd + NGD_STATUS);
@@ -1452,71 +1619,71 @@ static int msm8953_slim_power_up(struct msm8953_slim_ctrl *dev)
 		dev_dbg(dev->dev, "NGD already has LADDR, stat=0x%x\n",
 			laddr);
 
-	/*
-	 * Always reinitialize DMA and wait for MCAP, even when NGD_LADDR
-	 * is already set. After SSR recovery, BAM was torn down but the
-	 * NGD hardware might still have a stale LADDR. Skipping DMA init
-	 * here would leave us with no BAM RX (can't receive MCAP or ACKs)
-	 * and no BAM TX (can't send REPORT_SATELLITE).
-	 */
+capability_retry:
 	reinit_completion(&dev->reconf);
+	dev->mcap_gen = atomic_read(&dev->ssr_gen);
 
 	ret = msm8953_slim_init_dma(dev);
 	if (ret)
 		dev_warn(dev->dev, "DMA init failed: %d\n", ret);
 
-	/*
-	 * Allow DMA RX descriptors to be fully submitted before enabling
-	 * the NGD message queues. Without this, the ADSP may send MCAP
-	 * before the BAM RX chain is consuming, causing it to be lost.
-	 */
 	usleep_range(1000, 2000);
 
-	/* Configure NGD registers — enables RX/TX message queues */
-	msm8953_slim_ngd_setup(dev);
+	ret = msm8953_slim_ngd_setup(dev);
+	if (ret == -EAGAIN) {
+		if (mcap_retries < INIT_MX_RETRIES &&
+		    !atomic_read(&dev->ssr_in_progress)) {
+			mcap_retries++;
+			msm8953_slim_teardown_dma(dev);
+			msleep(100);
+			goto capability_retry;
+		}
+		return -ETIMEDOUT;
+	}
 
-	/*
-	 * Wait for MASTER_CAPABILITY.  On MSM8953 the ADSP typically
-	 * sends MCAP almost immediately after BAM pipes are connected.
-	 */
-	timeout = wait_for_completion_timeout(&dev->reconf, 3 * HZ);
-	if (timeout) {
-		dev_info(dev->dev, "SLIM SAT: Rcvd master capability\n");
-		ret = msm8953_slim_report_satellite(dev);
-		if (ret)
-			dev_warn(dev->dev, "REPORT_SAT failed: %d\n", ret);
+	timeout = wait_for_completion_timeout(&dev->reconf, HZ);
+	if (atomic_read(&dev->ssr_in_progress))
+		return -ENODEV;
 
-		/*
-		 * BAM RX is alive RIGHT NOW.  Probe candidate addresses
-		 * to find WCD9335 before ADSP wipes BAM (~1-2s from now).
-		 */
-		/* Addresses confirmed by scan: 192-200 respond to REQUEST_VALUE */
-	} else {
+	if (!timeout) {
 		u32 cfg  = readl_relaxed(ngd + NGD_CFG);
 		u32 stat = readl_relaxed(ngd + NGD_STATUS);
 
-		dev_dbg(dev->dev,
-			 "MCAP timeout, proceeding. stat=0x%x cfg=0x%x\n",
-			 stat, cfg);
-
-		/*
-		 * Send REPORT_SATELLITE even without MCAP. The ADSP needs
-		 * this to set up audio data routing through SLIMbus.
-		 * Without it, CONNECT/DEF_ACT_CHAN are ACKed at the bus
-		 * manager level but the ADSP audio path doesn't link to
-		 * the SLIMbus data channels.
-		 */
-		ret = msm8953_slim_report_satellite(dev);
-		if (ret)
-			dev_warn(dev->dev, "REPORT_SAT (no MCAP): %d\n", ret);
-		else
-			dev_info(dev->dev, "REPORT_SAT sent OK (no MCAP)\n");
+		dev_warn(dev->dev,
+			 "MCAP timeout (attempt %d), stat=0x%x cfg=0x%x\n",
+			 mcap_retries, stat, cfg);
+		if (mcap_retries < INIT_MX_RETRIES &&
+		    !atomic_read(&dev->ssr_in_progress)) {
+			mcap_retries++;
+			if (cfg == 0) {
+				/*
+				 * ADSP reset SLIMbus HW after our NGD setup.
+				 * Re-send PM_ACTIVE to kick ADSP SLIMbus
+				 * manager, then retry without DMA teardown
+				 * (matching downstream capability_retry).
+				 */
+				dev_info(dev->dev,
+					 "NGD_CFG cleared by ADSP, re-sending PM_ACTIVE\n");
+				msm8953_slim_qmi_power_request(dev, true);
+				msleep(50);
+			}
+			goto capability_retry;
+		}
+		return -ETIMEDOUT;
 	}
 
-	/* Mark SLIMbus clock active for framework */
-	dev->ctrl.sched.clk_state = SLIM_CLK_ACTIVE;
+	ret = msm8953_slim_report_satellite(dev);
+	if (ret) {
+		dev_warn(dev->dev, "REPORT_SAT failed: %d\n", ret);
+		return ret;
+	}
 
-	/* Signal that the bus is up */
+	if (atomic_read(&dev->ssr_in_progress)) {
+		dev_warn(dev->dev, "SSR during power_up, aborting\n");
+		return -ENODEV;
+	}
+
+	dev->ctrl.sched.clk_state = SLIM_CLK_ACTIVE;
 	complete_all(&dev->ctrl_up);
 	schedule_work(&dev->slave_notify_work);
 
@@ -1551,11 +1718,36 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 	 * The satellite can ONLY access PGD devices (LA=192-196).
 	 */
 
-	/* Reconfiguration messages are handled by the ADSP master */
+	/* Drop CORE reconfiguration messages from the framework — these
+	 * are sent during boot/probe and confuse the ADSP. The raw CORE
+	 * reconfig sequence is sent directly via BAM TX from enable_stream
+	 * during playback only. */
 	if (txn->mt == SLIM_MSG_MT_CORE &&
 	    txn->mc >= SLIM_MSG_MC_BEGIN_RECONFIGURATION &&
 	    txn->mc <= SLIM_MSG_MC_RECONFIGURE_NOW)
 		return 0;
+
+	/*
+	 * Send CORE CHANGE_VALUE as-is (no conversion).
+	 *
+	 * ADSP firmware RE (0xf04ca424 dispatcher) confirms the ADSP has
+	 * no handler for MC=0x68 (CORE CHANGE_VALUE) OR MC=0x00 (USR
+	 * REPEAT_CHANGE_VALUE); both fall into the "invalid MC" cleanup
+	 * path and are ACK'd at transport layer without any bus action.
+	 *
+	 * Downstream slim-msm-ngd.c:611 sends CORE CHANGE_VALUE via BAM
+	 * TX directly — the MSM NGD hardware emits it as a standard
+	 * SLIMbus bus frame, which the codec (a normal SLIMbus slave at
+	 * LA=199/200) processes. REPEAT_CHANGE_VALUE (a Qualcomm USR MC)
+	 * is not a valid bus frame type, so converting is actively wrong.
+	 */
+
+	/*
+	 * Convert CORE REQUEST_VALUE to CORE but keep it as-is.
+	 * The downstream NGD controller sends REQUEST_VALUE as CORE
+	 * and the ADSP does process it (unlike other CORE messages).
+	 * Add a timeout log so we can diagnose if reads hang.
+	 */
 
 	/* Wake the bus — runtime resume sends QMI PM_ACTIVE to ADSP */
 	ret = pm_runtime_get_sync(dev->dev);
@@ -1630,7 +1822,7 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 			la = SLIM_LA_MGR;      /* destination = manager */
 			wbuf[i++] = slim_port; /* codec port number */
 
-			dev_dbg(dev->dev,
+			dev_info(dev->dev,
 			       "CONNECT: la=%d port=%d\n",
 			       txn->la, slim_port);
 		}
@@ -1649,7 +1841,7 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 		txn->msg->wbuf = wbuf;
 		txn->rl = txn->msg->num_bytes + 4;
 
-		dev_dbg(dev->dev,
+		dev_info(dev->dev,
 			"CONNECT: mc=0x%x la=%d port=%d chan=%d tid=%d\n",
 			txn->mc, wbuf[0], wbuf[1],
 			(txn->mc != SLIM_USR_MC_DISCONNECT_PORT) ? wbuf[2] : -1,
@@ -1683,14 +1875,16 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 	if (slim_tid_txn(txn->mt, txn->mc))
 		*(puc++) = txn->tid;
 
-	if (slim_ec_txn(txn->mt, txn->mc)) {
+	if (slim_ec_txn(txn->mt, txn->mc) ||
+	    (txn->mt == SLIM_MSG_MT_DEST_REFERRED_USER &&
+	     txn->mc == SLIM_USR_MC_REPEAT_CHANGE_VALUE)) {
 		*(puc++) = txn->ec & 0xFF;
 		*(puc++) = (txn->ec >> 8) & 0xFF;
 		if (txn->mc == SLIM_MSG_MC_REQUEST_VALUE)
 			dev_dbg(dev->dev, "REQ_VALUE: la=%d ec=0x%04x len=%d\n",
 				 la, txn->ec, txn->msg ? txn->msg->num_bytes : 0);
-		else if (txn->mc == SLIM_MSG_MC_CHANGE_VALUE)
-			dev_dbg(dev->dev, "CHG_VALUE: la=%d ec=0x%04x len=%d\n",
+		else if (txn->mc == SLIM_USR_MC_REPEAT_CHANGE_VALUE)
+			dev_dbg(dev->dev, "REPEAT_CHG_VALUE: la=%d ec=0x%04x len=%d\n",
 				 la, txn->ec, txn->msg ? txn->msg->num_bytes : 0);
 	}
 
@@ -1700,20 +1894,14 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 	txn_mc = txn->mc;
 	txn_mt = txn->mt;
 
-	/* Log all TX messages for debugging */
-	if (txn_mc != 0x60 && txn_mc != 0x68) {  /* Skip VALUE read/write spam */
-		u8 *tb = (u8 *)pbuf;
-
+	/* Log all TX messages for debugging (including VALUE writes) */
 #ifdef CONFIG_DEBUG_FS
+	{
+		u8 *tb = (u8 *)pbuf;
 		msm8953_slim_log_msg(dev, 0, tb, min_t(u8, txn->rl, 16));
-#endif
 	}
+#endif
 
-	/*
-	 * Use direct BAM TX when available. The ADSP handles BAM TX
-	 * messages differently from AHB TX — it forwards VALUE messages
-	 * from BAM to the codec but blocks them from AHB.
-	 */
 	if (dev->use_bam_tx) {
 		ret = msm8953_slim_bam_tx(dev, pbuf, txn->rl);
 	} else {
@@ -1733,9 +1921,23 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 
 	dev->wr_comp = NULL;
 
-	if (ret)
-		dev_warn(dev->dev, "TX failed: mc=0x%x mt=0x%x ret=%d\n",
-			 txn_mc, txn_mt, ret);
+	if (ret) {
+		/*
+		 * MC=0x60 REQUEST_VALUE NACKs from the codec PGD happen
+		 * routinely once the SLIMbus enters streaming mode (the codec
+		 * stops servicing AP control reads during audio data flow).
+		 * Rate-limit those so dmesg isn't flooded; report everything
+		 * else normally.
+		 */
+		if (txn_mt == SLIM_MSG_MT_CORE &&
+		    txn_mc == SLIM_MSG_MC_REQUEST_VALUE)
+			dev_warn_ratelimited(dev->dev,
+				"TX failed: mc=0x%x mt=0x%x ret=%d (PGD read NACK; expected during streaming)\n",
+				txn_mc, txn_mt, ret);
+		else
+			dev_warn(dev->dev, "TX failed: mc=0x%x mt=0x%x ret=%d\n",
+				 txn_mc, txn_mt, ret);
+	}
 
 	/* Wait for ADSP ACK on CONNECT with PGD LA */
 	if (!ret && txn->comp &&
@@ -1753,10 +1955,20 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 			slim_free_txn_tid(ctrl, txn);
 			ret = 0; /* non-fatal */
 		} else {
-			dev_dbg(dev->dev,
+			dev_info(dev->dev,
 				 "CONNECT ACK received! mc=0x%x tid=%d\n",
 				 txn_mc, txn->tid);
 		}
+
+		/*
+		 * NOTE: PGD port configuration for audio data ports is
+		 * managed by the ADSP, not the apps processor.
+		 * The ADSP arms its own BAM pipes (EE0, pipes 3-19)
+		 * in response to CONNECT + DEF_ACT_CHAN messages.
+		 * The apps processor only manages pipes 21/22 (MAD).
+		 * Writing PGD_PORT_CFGn from the apps side for audio
+		 * ports causes I/O errors by conflicting with the ADSP.
+		 */
 	}
 
 xfer_err:
@@ -1840,7 +2052,7 @@ static int msm8953_slim_get_laddr(struct slim_controller *ctrl,
 	*puc++ = txn.tid;
 	memcpy(puc, ea_bytes, 6);
 
-	dev_dbg(dev->dev,
+	dev_info(dev->dev,
 		 "ADDR_QUERY: ea=%04x:%04x:%d:%d tid=%d [%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x]\n",
 		 ea->manf_id, ea->prod_code, ea->dev_index, ea->instance,
 		 txn.tid,
@@ -1922,17 +2134,6 @@ static void msm8953_slim_slave_notify_worker(struct work_struct *work)
 	struct device_node *parent = dev->ngd_node ?: dev->dev->of_node;
 
 	/*
-	 * Wait for the WCD9335 codec driver to probe. It needs to:
-	 * 1. Enable MCLK via gpio-gate-clock (asserts PMIC GPIO)
-	 * 2. Release reset GPIO
-	 * 3. Wait for codec to boot SLIMbus interface
-	 * 4. Codec sends REPORT_PRESENT to ADSP manager
-	 * 5. ADSP assigns LA
-	 *
-	 * Only then can ADDR_QUERY succeed. The codec driver probe runs
-	 * asynchronously, so we wait 1s to ensure it completes.
-	 */
-	/*
 	 * Wait for codec to boot. The WCD9335 needs MCLK + reset release
 	 * (done by its driver probe) before it can enumerate on SLIMbus.
 	 * The probe runs asynchronously — wait 5s for it to complete,
@@ -1940,12 +2141,41 @@ static void msm8953_slim_slave_notify_worker(struct work_struct *work)
 	 * 5s + 60 retries × 500ms = 35s total window.
 	 */
 	msleep(5000);
+
+	/*
+	 * If SSR happened during our initial sleep, wait for recovery
+	 * before attempting ADDR_QUERY.
+	 */
+	if (dev->state == MSM8953_SLIM_DOWN) {
+		dev_info(dev->dev, "slave_notify: SSR during init, waiting for recovery\n");
+		wait_for_completion_interruptible(&dev->ctrl_up);
+		msleep(2000);
+	}
+
 	for_each_child_of_node(parent, node) {
 		sbdev = of_slim_get_device(ctrl, node);
 		if (!sbdev)
 			continue;
 
 		for (j = 0; j < LADDR_RETRY; j++) {
+			/*
+			 * If SSR happened during retries, the ADSP was
+			 * restarted and doesn't know this device anymore.
+			 * Wait for recovery and restart the retry loop.
+			 */
+			if (dev->state == MSM8953_SLIM_DOWN) {
+				dev_info(dev->dev,
+					 "%s: SSR detected at attempt %d, waiting for recovery\n",
+					 dev_name(&sbdev->dev), j);
+				sbdev->is_laddr_valid = false;
+				wait_for_completion_interruptible(&dev->ctrl_up);
+				msleep(2000);
+				j = 0;
+				dev_info(dev->dev,
+					 "%s: SSR recovered, restarting ADDR_QUERY\n",
+					 dev_name(&sbdev->dev));
+			}
+
 			ret = slim_get_logical_addr(sbdev);
 			if (!ret) {
 				dev_info(dev->dev, "%s: got laddr %d (attempt %d)\n",
@@ -1973,6 +2203,26 @@ static void msm8953_slim_slave_notify_worker(struct work_struct *work)
 					 dev_name(&sbdev->dev), ret);
 			}
 		}
+
+		/*
+		 * Notify the codec driver that the device is UP.
+		 * slim_get_logical_addr() does this internally when it
+		 * succeeds, but the fallback path above bypasses it.
+		 * The codec's device_status callback (wcd9335_slim_status)
+		 * completes initialization: regmap, IRQ, ASoC registration.
+		 */
+		if (sbdev->is_laddr_valid &&
+		    sbdev->status != SLIM_DEVICE_STATUS_UP) {
+			struct slim_driver *sbdrv;
+
+			sbdev->status = SLIM_DEVICE_STATUS_UP;
+			if (sbdev->dev.driver) {
+				sbdrv = to_slim_driver(sbdev->dev.driver);
+				if (sbdrv->device_status)
+					sbdrv->device_status(sbdev,
+							     sbdev->status);
+			}
+		}
 		put_device(&sbdev->dev);
 	}
 
@@ -1985,12 +2235,22 @@ static int msm8953_slim_ngd_enable(struct msm8953_slim_ctrl *dev)
 	int ret;
 	unsigned long timeout;
 
+	dev_info(dev->dev, "ngd_enable: waiting for QMI (qmi_done=%d)\n",
+		 completion_done(&dev->qmi_up));
+	/*
+	 * Cold-boot timing varies a lot on this platform: the ADSP needs
+	 * to load its firmware and start its QMI helper service. Observed
+	 * boots take ~25 ms when warm but occasionally exceed 10 s when
+	 * cold. Bumping to 30 s avoids the soundcard staying deferred.
+	 */
 	timeout = wait_for_completion_timeout(&dev->qmi_up,
-					      msecs_to_jiffies(10000));
+					      msecs_to_jiffies(30000));
 	if (!timeout) {
-		dev_err(dev->dev, "QMI service not found after 10s\n");
+		dev_err(dev->dev, "QMI service not found after 30s (state=%d)\n",
+			dev->state);
 		return -ETIMEDOUT;
 	}
+	dev_info(dev->dev, "ngd_enable: QMI ready\n");
 
 	{
 		int sel_retries = 0;
@@ -2027,15 +2287,61 @@ static int msm8953_slim_ngd_enable(struct msm8953_slim_ctrl *dev)
 static void msm8953_slim_ngd_up_worker(struct work_struct *work)
 {
 	struct msm8953_slim_ctrl *dev =
-		container_of(work, struct msm8953_slim_ctrl, ngd_up_work);
+		container_of(to_delayed_work(work), struct msm8953_slim_ctrl,
+			     ngd_up_work);
+	u32 gen;
+	int ret, retries = 0;
+
+	gen = dev->ngd_up_gen;
+
+	dev_info(dev->dev, "ngd_up_worker: start (state=%d qmi=%d gen=%u)\n",
+		 dev->state, completion_done(&dev->qmi_up), gen);
+
+retry:
+	if (gen != atomic_read(&dev->ssr_gen)) {
+		dev_info(dev->dev, "ngd_up_worker: stale (gen %u != %d), bailing\n",
+			 gen, atomic_read(&dev->ssr_gen));
+		return;
+	}
 
 	mutex_lock(&dev->tx_lock);
+	/*
+	 * Transition out of DOWN before attempting power-up.  This ensures
+	 * that if the ADSP crashes while we are inside power_up (waiting
+	 * for MCAP, sending REPORT_SATELLITE, etc.), the SSR DOWN handler
+	 * will actually process the event instead of dropping it as a
+	 * "duplicate DOWN".  Without this, the initial probe sets state=DOWN,
+	 * and an early ADSP crash would be silently ignored because the
+	 * guard sees state==DOWN and skips teardown.
+	 */
+	dev->state = MSM8953_SLIM_ASLEEP;
 	pm_runtime_disable(dev->dev);
 	pm_runtime_set_suspended(dev->dev);
 	pm_runtime_enable(dev->dev);
 	mutex_unlock(&dev->tx_lock);
 
-	msm8953_slim_ngd_enable(dev);
+	ret = msm8953_slim_ngd_enable(dev);
+
+	/*
+	 * Increase retries from 2 to 5. Cold boots where ADSP QMI takes
+	 * its sweet time can need more than the original 2 attempts before
+	 * the bus comes up.
+	 */
+	if (ret && retries < 5 && gen == atomic_read(&dev->ssr_gen)) {
+		retries++;
+		dev_warn(dev->dev,
+			 "ngd_up_worker: attempt %d failed (%d), retrying in 500ms\n",
+			 retries, ret);
+		mutex_lock(&dev->tx_lock);
+		msm8953_slim_teardown_dma(dev);
+		dev->state = MSM8953_SLIM_DOWN;
+		mutex_unlock(&dev->tx_lock);
+		msleep(500);
+		goto retry;
+	}
+
+	dev_info(dev->dev, "ngd_up_worker: done ret=%d (state=%d qmi=%d)\n",
+		 ret, dev->state, completion_done(&dev->qmi_up));
 }
 
 /* ---- SSR / PDR notifiers ------------------------------------------------- */
@@ -2046,21 +2352,70 @@ static void msm8953_slim_ssr_pdr_notify(struct msm8953_slim_ctrl *dev,
 	switch (action) {
 	case QCOM_SSR_BEFORE_SHUTDOWN:
 	case SERVREG_SERVICE_STATE_DOWN:
-		dev_info(dev->dev, "SSR/PDR: service DOWN (action=%lu)\n",
-			 action);
+		/*
+		 * Guard against late duplicate DOWN events.
+		 *
+		 * SSR and PDR both fire for the same ADSP crash, and PDR
+		 * DOWN can arrive after SSR recovery has already completed.
+		 * Processing it would tear down a working bus.
+		 *
+		 * Only process DOWN when transitioning out of a non-DOWN
+		 * state.  The first DOWN (SSR or PDR) does the teardown;
+		 * any duplicate is ignored.
+		 */
+		if (dev->state == MSM8953_SLIM_DOWN) {
+			dev_dbg(dev->dev,
+				"SSR/PDR: DOWN ignored — already DOWN (action=%lu)\n",
+				action);
+			break;
+		}
+		dev_info(dev->dev, "SSR/PDR: service DOWN (action=%lu, state=%d)\n",
+			 action, dev->state);
 		atomic_set(&dev->ssr_in_progress, 1);
+		atomic_inc(&dev->ssr_gen);
 		dev->state = MSM8953_SLIM_DOWN;
+		cancel_delayed_work(&dev->ngd_up_work);
+		complete_all(&dev->reconf);
+		complete_all(&dev->ctrl_up);
 		reinit_completion(&dev->ctrl_up);
-		reinit_completion(&dev->qmi_up);
+		/*
+		 * Don't reinit qmi_up here — the QMI framework's
+		 * del_server/new_server callbacks own that lifecycle.
+		 * Reiniting it here races with a concurrent recovery
+		 * where new_server already re-completed qmi_up.
+		 */
+
+		/*
+		 * Fully quiesce the local NGD controller:
+		 * - Disable NGD (clears ENABLE, RX_MSGQ_EN, TX_MSGQ_EN)
+		 * - Clear interrupt enable mask
+		 * This prevents stale MCAP or other IRQs from the
+		 * pre-crash ADSP from firing into the recovery path.
+		 */
+		{
+			void __iomem *ngd = ngd_base(dev);
+
+			writel_relaxed(0, ngd + NGD_CFG);
+			writel_relaxed(0, ngd + NGD_INT_EN);
+			mb();
+		}
+
 		msm8953_slim_teardown_dma(dev);
 		break;
 	case QCOM_SSR_AFTER_POWERUP:
 	case SERVREG_SERVICE_STATE_UP:
+		if (dev->state != MSM8953_SLIM_DOWN) {
+			dev_dbg(dev->dev,
+				"SSR/PDR: UP ignored (action=%lu, state=%d)\n",
+				action, dev->state);
+			break;
+		}
 		dev_info(dev->dev, "SSR/PDR: service UP (action=%lu)\n",
 			 action);
 		atomic_set(&dev->ssr_in_progress, 0);
+		dev->ngd_up_gen = atomic_read(&dev->ssr_gen);
 		reinit_completion(&dev->ctrl_up);
-		schedule_work(&dev->ngd_up_work);
+		schedule_delayed_work(&dev->ngd_up_work, 0);
 		break;
 	default:
 		break;
@@ -2099,17 +2454,30 @@ static int msm8953_slim_runtime_resume(struct device *device)
 		mutex_unlock(&dev->tx_lock);
 		return 0;
 	}
-	if (dev->state >= MSM8953_SLIM_ASLEEP)
-		ret = msm8953_slim_power_up(dev);
+
+	if (dev->state >= MSM8953_SLIM_ASLEEP) {
+		/*
+		 * Lightweight resume: just send QMI PM_ACTIVE to wake
+		 * the ADSP SLIMbus manager.  Do NOT redo DMA init,
+		 * NGD_CFG, or REPORT_SATELLITE — the ADSP already has
+		 * our satellite registration from the initial power_up
+		 * in ngd_enable.  Re-sending NGD_CFG here causes MCAP
+		 * timeouts because the ADSP doesn't expect a fresh
+		 * negotiation from a satellite it already knows about.
+		 *
+		 * This matches downstream's ngd_slim_power_up(dev, false)
+		 * path which only sends PM_ACTIVE for runtime resume.
+		 */
+		ret = msm8953_slim_qmi_power_request(dev, true);
+		if (ret)
+			dev_warn(device, "QMI PM_ACTIVE on resume failed: %d\n",
+				 ret);
+	}
+
 	if (!ret) {
 		dev->state = MSM8953_SLIM_AWAKE;
+		dev->ctrl.sched.clk_state = SLIM_CLK_ACTIVE;
 	} else {
-		/*
-		 * Don't propagate power_up failure to PM runtime —
-		 * matching upstream behavior.  If we return an error,
-		 * PM runtime records runtime_error and blocks all future
-		 * resume calls, preventing SSR recovery.
-		 */
 		if (dev->state != MSM8953_SLIM_DOWN)
 			dev->state = MSM8953_SLIM_ASLEEP;
 		else
@@ -2190,6 +2558,21 @@ static int msm8953_slim_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "apps_pipes: 0x%08x\n", dev->apps_pipes);
 	seq_printf(s, "ssr: %s\n",
 		   atomic_read(&dev->ssr_in_progress) ? "yes" : "no");
+
+	/* PGD port registers (MMIO) */
+	if (dev->state != MSM8953_SLIM_DOWN) {
+		int p;
+
+		seq_puts(s, "\nPGD ports:\n");
+		for (p = 0; p < 6; p++) {
+			u32 cfg = readl_relaxed(dev->base + 0x14000 + p * 0x1000);
+			u32 stat = readl_relaxed(dev->base + 0x14004 + p * 0x1000);
+
+			if (cfg || stat)
+				seq_printf(s, "  port %d: CFG=0x%08x STAT=0x%08x\n",
+					   p, cfg, stat);
+		}
+	}
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(msm8953_slim_status);
@@ -2334,6 +2717,7 @@ static int msm8953_slim_probe(struct platform_device *pdev)
 	memset(dev->pipe_map, 0xFF, sizeof(dev->pipe_map));
 	dev->pipe_alloc = 0;
 	atomic_set(&dev->ssr_in_progress, 0);
+	atomic_set(&dev->ssr_gen, 0);
 
 	dev->state  = MSM8953_SLIM_DOWN;
 	dev->pgdla  = SLIM_LA_MGR;
@@ -2364,7 +2748,7 @@ static int msm8953_slim_probe(struct platform_device *pdev)
 	pm_runtime_enable(&pdev->dev);
 	pm_runtime_get_noresume(&pdev->dev);
 
-	INIT_WORK(&dev->ngd_up_work, msm8953_slim_ngd_up_worker);
+	INIT_DELAYED_WORK(&dev->ngd_up_work, msm8953_slim_ngd_up_worker);
 	INIT_WORK(&dev->slave_notify_work, msm8953_slim_slave_notify_worker);
 
 	ret = qmi_handle_init(&dev->qmi, 0, &msm8953_slim_qmi_ops, NULL);
@@ -2447,10 +2831,19 @@ static int msm8953_slim_probe(struct platform_device *pdev)
 	}
 
 	/*
-	 * Kick off bring-up — if ADSP isn't ready yet, the QMI/PDR
-	 * callbacks will re-trigger this when it comes up.
+	 * Don't schedule init from probe. Let the SSR/PDR callbacks
+	 * handle it — they fire when the ADSP boots and are the
+	 * authoritative signal that the ADSP is ready.
+	 *
+	 * This avoids the race where we start SLIMbus init, then the
+	 * modem triggers an ADSP crash mid-init. With event-driven
+	 * init, SSR DOWN cancels the work, and SSR UP reschedules it
+	 * after the ADSP has fully recovered.
+	 *
+	 * Safety: if SSR UP already fired before we registered the
+	 * notifier (shouldn't happen — remoteproc starts ADSP after
+	 * our probe), the QMI new_server callback will also trigger.
 	 */
-	schedule_work(&dev->ngd_up_work);
 
 	dev_info(&pdev->dev, "MSM8953 SLIMbus NGD controller registered\n");
 
@@ -2487,7 +2880,7 @@ static void msm8953_slim_remove(struct platform_device *pdev)
 	if (dev->pdr)
 		pdr_handle_release(dev->pdr);
 
-	cancel_work_sync(&dev->ngd_up_work);
+	cancel_delayed_work_sync(&dev->ngd_up_work);
 	cancel_work_sync(&dev->slave_notify_work);
 	msm8953_slim_qmi_power_request(dev, false);
 	msm8953_slim_teardown_dma(dev);

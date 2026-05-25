@@ -146,8 +146,16 @@ int slim_do_transfer(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 	}
 
 	ret = ctrl->xfer_msg(ctrl, txn);
-	if (ret == -ETIMEDOUT) {
-		slim_free_txn_tid(ctrl, txn);
+	if (ret) {
+		/*
+		 * Any xfer error (NACK, timeout, etc) means the response will
+		 * never arrive — so the TID we allocated will never be freed by
+		 * slim_msg_response(). Free it here. Without this, every NACKed
+		 * codec read leaks one TID; after 256 leaks slim_alloc_txn_tid()
+		 * fails with -ENOSPC and the bus is unrecoverable.
+		 */
+		if (need_tid)
+			slim_free_txn_tid(ctrl, txn);
 	} else if (!ret && need_tid && !txn->msg->comp) {
 		unsigned long ms = txn->rl + HZ;
 
@@ -159,9 +167,23 @@ int slim_do_transfer(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 		}
 	}
 
-	if (ret)
-		dev_err(ctrl->dev, "Tx:MT:0x%x, MC:0x%x, LA:0x%x failed:%d\n",
-			txn->mt, txn->mc, txn->la, ret);
+	if (ret) {
+		/*
+		 * Rate-limit CORE REQUEST_VALUE NACKs — they happen routinely
+		 * on Qualcomm WCD codecs once the SLIMbus enters streaming mode
+		 * (the codec stops servicing control reads during audio data
+		 * flow). Other failures keep the original error level.
+		 */
+		if (txn->mt == SLIM_MSG_MT_CORE &&
+		    txn->mc == SLIM_MSG_MC_REQUEST_VALUE)
+			dev_err_ratelimited(ctrl->dev,
+				"Tx:MT:0x%x, MC:0x%x, LA:0x%x failed:%d\n",
+				txn->mt, txn->mc, txn->la, ret);
+		else
+			dev_err(ctrl->dev,
+				"Tx:MT:0x%x, MC:0x%x, LA:0x%x failed:%d\n",
+				txn->mt, txn->mc, txn->la, ret);
+	}
 
 slim_xfer_err:
 	if (!clk_pause_msg && (txn->tid == 0  || ret == -ETIMEDOUT)) {
