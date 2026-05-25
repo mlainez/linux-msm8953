@@ -349,11 +349,12 @@
 			"AMIC2", "Headset Mic",
 			"Headphone Jack", "HPHL",
 			"Headphone Jack", "HPHR",
-			"EAR", "EAR PA",
+			"Earpiece", "EAR",
 			"DMIC1", "Digital Mic1",
 			"DMIC2", "Digital Mic2";
-	widgets = "Speaker", "Speaker";
-	pin-switches = "Speaker";
+	widgets = "Speaker", "Speaker",
+		  "Speaker", "Earpiece";
+	pin-switches = "Speaker", "Earpiece";
 
 	/delete-node/ primary-mi2s-dai-link;
 	/delete-node/ tertiary-mi2s-dai-link;

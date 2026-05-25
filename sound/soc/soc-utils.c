@@ -35,7 +35,15 @@ int snd_soc_ret(const struct device *dev, int ret, const char *fmt, ...)
 		vaf.fmt = fmt;
 		vaf.va = &args;
 
-		dev_err(dev, "ASoC error (%d): %pV", ret, &vaf);
+		/*
+		 * Rate-limit: Qualcomm WCD codecs (on this msm8953 board)
+		 * NACK control reads from the AP once SLIMbus enters
+		 * streaming mode. DAPM's read-modify-write cycles then spam
+		 * dmesg with one ASoC error per failed transfer. Rate-limit
+		 * so the actual playback errors stay visible.
+		 */
+		dev_err_ratelimited(dev, "ASoC error (%d): %pV", ret, &vaf);
+		va_end(args);
 	}
 
 	return ret;

@@ -58,6 +58,7 @@ int apr_send_pkt(struct apr_device *adev, struct apr_pkt *pkt)
 	struct apr_hdr *hdr;
 	unsigned long flags;
 	int ret;
+	u8 *body;
 
 	spin_lock_irqsave(&adev->svc.lock, flags);
 
@@ -66,6 +67,21 @@ int apr_send_pkt(struct apr_device *adev, struct apr_pkt *pkt)
 	hdr->src_svc = adev->svc.id;
 	hdr->dest_domain = adev->domain_id;
 	hdr->dest_svc = adev->svc.id;
+
+	/*
+	 * APR byte-level logging (2026-04-17, debugging earpiece PSTAT=0):
+	 * Dump key header fields + first payload bytes for every TX packet.
+	 * Lets us diff against downstream IPC log during audio setup.
+	 */
+	body = (u8 *)pkt;
+	dev_info(&adev->dev,
+		"APR TX: dom=%d->%d svc=%d->%d mt=%d tok=0x%x op=0x%x sz=%d "
+		"body[%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x]\n",
+		hdr->src_domain, hdr->dest_domain, hdr->src_svc, hdr->dest_svc,
+		APR_HDR_FIELD_MT(hdr->hdr_field), hdr->token, hdr->opcode,
+		hdr->pkt_size,
+		body[0], body[1], body[2], body[3], body[4], body[5], body[6], body[7],
+		body[8], body[9], body[10], body[11], body[12], body[13], body[14], body[15]);
 
 	ret = rpmsg_trysend(apr->ch, pkt, hdr->pkt_size);
 	spin_unlock_irqrestore(&adev->svc.lock, flags);
@@ -237,6 +253,35 @@ static int apr_do_rx_callback(struct packet_router *apr, struct apr_rx_buf *abuf
 		adrv = to_apr_driver(adev->dev.driver);
 	}
 	spin_unlock_irqrestore(&apr->svcs_lock, flags);
+
+	/*
+	 * APR RX logging (2026-04-17) — mirror of TX in apr_send_pkt.
+	 * Dump from offset 0 so we see the actual on-wire header (ADSP can use
+	 * extended headers > APR_HDR_SIZE=20) and can decode orig_opcode+status
+	 * for APR_BASIC_RSP_RESULT (0x110e8). Earlier version dumped past a
+	 * fixed 20-byte offset and missed the status word.
+	 */
+	{
+		u8 *body = (u8 *)buf;
+		int plen = len;
+		u8 p[40] = {0};
+		int i;
+
+		for (i = 0; i < 40 && i < plen; i++)
+			p[i] = body[i];
+		dev_info(apr->dev,
+			"APR RX: dom=%d->%d svc=%d->%d mt=%d tok=0x%x op=0x%x sz=%d hs=%d "
+			"raw[%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x "
+			"%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x "
+			"%02x %02x %02x %02x %02x %02x %02x %02x]\n",
+			hdr->src_domain, hdr->dest_domain, hdr->src_svc, hdr->dest_svc,
+			msg_type, hdr->token, hdr->opcode, hdr->pkt_size, hdr_size,
+			p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+			p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15],
+			p[16], p[17], p[18], p[19], p[20], p[21], p[22], p[23],
+			p[24], p[25], p[26], p[27], p[28], p[29], p[30], p[31],
+			p[32], p[33], p[34], p[35], p[36], p[37], p[38], p[39]);
+	}
 
 	if (!adrv || !adev) {
 		dev_err(apr->dev, "APR: service is not registered (%d)\n",
