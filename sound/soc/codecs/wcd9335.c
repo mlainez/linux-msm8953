@@ -5528,27 +5528,39 @@ static int wcd9335_bring_up(struct wcd9335_codec *wcd)
 	struct regmap *rm = wcd->regmap;
 	int val, byte0;
 	int ret;
+	int wr_retries;
 
 	/*
-	 * On MSM8953, efuse sensing requires the codec's internal MCLK
-	 * and master bias to be enabled first (complex init sequence).
-	 * During the early bring_up phase, those aren't set up yet.
-	 * Skip the efuse-based version detection and assume v2.0,
-	 * which is the only version used on production hardware.
-	 * Efuse sensing will be done later in wcd9335_codec_probe().
+	 * On MSM8953, the codec PGD may not service AP slim writes
+	 * immediately after laddr assignment — the very first writes can
+	 * NACK with -EIO. Without a real ANA_BIAS / ANA_CLK_TOP write,
+	 * the codec stays in low-power and nothing else works.
+	 * REGCACHE_MAPLE silently hides the failure (cache gets updated
+	 * even when bus write fails), so we MUST check ret and retry.
+	 *
+	 * Retry the critical first write up to 10x with growing sleeps.
+	 * If it still fails we abort bring_up — better than continuing
+	 * with an uninitialized codec.
 	 */
-	/*
-	 * Enable the codec's internal MCLK distribution before any
-	 * register operations.  Without this, all register reads return 0
-	 * because the internal clock circuits aren't running.
-	 * The external MCLK (from RPM DIV_CLK2) was enabled in slim_probe.
-	 */
-	/*
-	 * Boot the codec: enable master bias, then internal MCLK.
-	 * Without this sequence, all register reads return 0x00.
-	 */
-	/* 1. Enable master bias (needed for all analog circuits) */
-	regmap_write(rm, WCD9335_ANA_BIAS, 0xE0);
+	for (wr_retries = 0; wr_retries < 10; wr_retries++) {
+		ret = regmap_write(rm, WCD9335_ANA_BIAS, 0xE0);
+		if (!ret)
+			break;
+		dev_warn(wcd->dev,
+			 "bring_up: ANA_BIAS write attempt %d failed (%d), retrying\n",
+			 wr_retries + 1, ret);
+		usleep_range(5000, 10000);
+	}
+	if (ret) {
+		dev_err(wcd->dev,
+			"bring_up: ANA_BIAS write failed after %d retries (%d) — codec not initialized\n",
+			wr_retries, ret);
+		return ret;
+	}
+	if (wr_retries)
+		dev_info(wcd->dev,
+			 "bring_up: ANA_BIAS write succeeded after %d retries\n",
+			 wr_retries);
 	/* bit7=EN, bit6=PRECHRG_EN, bit5=PRECHRG_CTL_MODE_AUTO */
 	usleep_range(1000, 1100);
 
