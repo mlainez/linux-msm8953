@@ -2014,6 +2014,14 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 			 cfg->bps, cfg->rate);
 
 		/*
+		 * Tried cache_only=true here to silence the NACK flood and
+		 * preserve audio after 0.5s — but it also blocks the EAR PA
+		 * widget enable write (ANA_EAR bit 7) that DAPM issues right
+		 * after trigger START. Reverted; the NACKs are noisy but the
+		 * codec writes that matter for sound do need to reach the bus.
+		 */
+
+		/*
 		 * Do NOT write MULTI_CH / PORT_CFG here.
 		 * In downstream, the codec writes them in DAPM POST_PMU
 		 * (before AFE_DEVICE_START), then the ADSP overwrites
