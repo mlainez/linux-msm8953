@@ -932,6 +932,28 @@ static const struct qcom_pas_data msm8996_adsp_resource = {
 	.ssctl_id = 0x14,
 };
 
+/*
+ * Same as msm8996_adsp_resource but with auto_boot=false so that
+ * userspace can wait for rmtfs/qrtr/pd-mapper to be running before
+ * starting the ADSP. On MSM8953 (FP3+), booting the ADSP before
+ * those services are up causes the ADSP firmware to crash early
+ * with "Excep:0:Exception detected" once it tries to access remote
+ * filesystem or persistent storage and times out.
+ */
+static const struct qcom_pas_data msm8953_adsp_resource = {
+	.crash_reason_smem = 423,
+	.firmware_name = "adsp.mdt",
+	.pas_id = 1,
+	.auto_boot = false,
+	.proxy_pd_names = (char*[]){
+		"cx",
+		NULL
+	},
+	.ssr_name = "lpass",
+	.sysmon_name = "adsp",
+	.ssctl_id = 0x14,
+};
+
 static const struct qcom_pas_data cdsp_resource_init = {
 	.crash_reason_smem = 601,
 	.firmware_name = "cdsp.mdt",
@@ -1441,7 +1463,7 @@ static const struct of_device_id qcom_pas_of_match[] = {
 	{ .compatible = "qcom,milos-mpss-pas", .data = &sm8450_mpss_resource},
 	{ .compatible = "qcom,milos-wpss-pas", .data = &sc7280_wpss_resource},
 	{ .compatible = "qcom,msm8226-adsp-pil", .data = &msm8996_adsp_resource},
-	{ .compatible = "qcom,msm8953-adsp-pil", .data = &msm8996_adsp_resource},
+	{ .compatible = "qcom,msm8953-adsp-pil", .data = &msm8953_adsp_resource},
 	{ .compatible = "qcom,msm8974-adsp-pil", .data = &msm8996_adsp_resource},
 	{ .compatible = "qcom,msm8996-adsp-pil", .data = &msm8996_adsp_resource},
 	{ .compatible = "qcom,msm8996-slpi-pil", .data = &msm8996_slpi_resource_init},

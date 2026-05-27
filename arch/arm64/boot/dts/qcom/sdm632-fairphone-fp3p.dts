@@ -312,6 +312,22 @@
 	};
 };
 
+/*
+ * The MSM8953 LPASS internal digital codec (compatible
+ * "qcom,msm8916-wcd-digital-codec") defaults to status = "okay" in
+ * msm8953.dtsi. Probing it does clk_prepare_enable(mclk) which fires
+ * an AFE_SVC_CMD_SET_PARAM (op=0x100f3) to the ADSP for the
+ * LPASS_CLK_ID_INTERNAL_DIGITAL_CODEC_CORE clock. On FP3+ that
+ * internal codec block is unused (audio routes through WCD9335 over
+ * SLIMbus and TAS2557 over MI2S), so trying to enable its clock makes
+ * the ADSP throw "Excep:0:Exception detected" ~2 s after the SET_PARAM
+ * acks, which then leaves the slim-NGD MCAP handshake permanently
+ * stuck. Disable it.
+ */
+&lpass_codec {
+	status = "disabled";
+};
+
 &sdhc_1 {
 	vmmc-supply = <&pm8953_l8>;
 	vqmmc-supply = <&pm8953_l5>;

@@ -3,6 +3,7 @@
 
 #include <linux/delay.h>
 #include <linux/regmap.h>
+#include <linux/slab.h>
 #include <linux/slimbus.h>
 #include <linux/module.h>
 
@@ -15,7 +16,8 @@
  * attempts (see techpack wcd9xxx-core.c:WCD9XXX_SLIM_RW_MAX_TRIES). Do
  * the same here so the problem doesn't leak into every codec driver.
  */
-#define REGMAP_SLIMBUS_MAX_TRIES	3
+#define REGMAP_SLIMBUS_MAX_TRIES		3
+#define REGMAP_SLIMBUS_PAGED_TRIES	3
 
 /*
  * Debug knobs for isolating which DAPM register writes to the WCD9335 PGD
@@ -93,10 +95,11 @@ static int regmap_slimbus_read(void *context, const void *reg, size_t reg_size,
 {
 	struct slim_device *sdev = context;
 	int tries = REGMAP_SLIMBUS_MAX_TRIES;
+	u16 addr = *(u16 *)reg;
 	int ret;
 
 	do {
-		ret = slim_read(sdev, *(u16 *)reg, val_size, val);
+		ret = slim_read(sdev, addr, val_size, val);
 		if (!ret || --tries == 0)
 			break;
 		usleep_range(5000, 5100);
@@ -111,6 +114,122 @@ static const struct regmap_bus regmap_slimbus_bus = {
 	.reg_format_endian_default = REGMAP_ENDIAN_LITTLE,
 	.val_format_endian_default = REGMAP_ENDIAN_LITTLE,
 };
+
+/*
+ * Flat register-window bus for WCD9335 (and similar Qualcomm SLIMbus codecs).
+ *
+ * The WCD9335 codec PGD does NOT have a page selector. Its register bank is
+ * exposed at SLIMbus value-element offset 0x800 — i.e. codec register `reg`
+ * is accessed at SLIMbus addr 0x800 + reg, for the full 16-bit register
+ * space. This matches downstream's TASHA_REGISTER_START_OFFSET = 0x800 in
+ * techpack/audio/asoc/codecs/wcd9xxx-core.c (slim_change_val_element /
+ * slim_request_val_element pass start_offset = 0x800 + reg).
+ *
+ * Earlier mainline forks tried regmap_range_cfg page-RMW and a
+ * "manual paging" bus that wrote a page selector at 0x800 then accessed
+ * 0x800+offset — both wrong: only registers with high byte == 0 happened
+ * to land at the right SLIMbus address; everything in pages 0x06, 0x0a,
+ * 0x0d, ... silently aliased to low-page registers and the codec NACKed.
+ *
+ * Bus used only when the codec driver requests it via
+ * regmap_init_slimbus_paged() (kept name for source compatibility).
+ * Drivers using the standard regmap_init_slimbus() see no change.
+ */
+struct regmap_slimbus_paged_ctx {
+	struct slim_device *sdev;
+};
+
+#define REGMAP_SLIMBUS_WCD_BASE	0x0800
+
+static int regmap_slimbus_paged_write(void *context, const void *data,
+				      size_t count)
+{
+	struct regmap_slimbus_paged_ctx *ctx = context;
+	struct slim_device *sdev = ctx->sdev;
+	int tries = REGMAP_SLIMBUS_PAGED_TRIES;
+	u16 vaddr = *(u16 *)data;
+	u16 hw_addr;
+	int ret;
+
+	if (sdev->laddr == 200) {
+		if (skip_codec_writes)
+			return 0;
+		if (vaddr >= skip_above || vaddr < skip_below)
+			return 0;
+	}
+
+	/*
+	 * Flat addressing: codec register `vaddr` is at SLIMbus
+	 * value-element offset 0x800 + vaddr. The codec has no page
+	 * register; what mainline called the "page selector" at 0x800
+	 * is just the first byte of the flat register window.
+	 */
+	hw_addr = REGMAP_SLIMBUS_WCD_BASE + vaddr;
+	do {
+		ret = slim_write(sdev, hw_addr, count - 2, (u8 *)data + 2);
+		if (!ret || --tries == 0)
+			break;
+		usleep_range(5000, 5100);
+	} while (1);
+
+	return ret;
+}
+
+static int regmap_slimbus_paged_read(void *context, const void *reg,
+				     size_t reg_size, void *val,
+				     size_t val_size)
+{
+	struct regmap_slimbus_paged_ctx *ctx = context;
+	struct slim_device *sdev = ctx->sdev;
+	int tries = REGMAP_SLIMBUS_PAGED_TRIES;
+	u16 vaddr = *(u16 *)reg;
+	u16 hw_addr;
+	int ret;
+
+	hw_addr = REGMAP_SLIMBUS_WCD_BASE + vaddr;
+	do {
+		ret = slim_read(sdev, hw_addr, val_size, val);
+		if (!ret || --tries == 0)
+			break;
+		usleep_range(5000, 5100);
+	} while (1);
+
+	return ret;
+}
+
+static void regmap_slimbus_paged_free_ctx(void *context)
+{
+	kfree(context);
+}
+
+static const struct regmap_bus regmap_slimbus_paged_bus = {
+	.write = regmap_slimbus_paged_write,
+	.read = regmap_slimbus_paged_read,
+	.free_context = regmap_slimbus_paged_free_ctx,
+	.reg_format_endian_default = REGMAP_ENDIAN_LITTLE,
+	.val_format_endian_default = REGMAP_ENDIAN_LITTLE,
+};
+
+struct regmap *__regmap_init_slimbus_paged(struct slim_device *slimbus,
+					   const struct regmap_config *config,
+					   struct lock_class_key *lock_key,
+					   const char *lock_name)
+{
+	struct regmap_slimbus_paged_ctx *ctx;
+
+	if (config->val_bits != 8 || config->reg_bits != 16)
+		return ERR_PTR(-ENOTSUPP);
+
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return ERR_PTR(-ENOMEM);
+
+	ctx->sdev = slimbus;
+
+	return __regmap_init(&slimbus->dev, &regmap_slimbus_paged_bus, ctx,
+			     config, lock_key, lock_name);
+}
+EXPORT_SYMBOL_GPL(__regmap_init_slimbus_paged);
 
 static const struct regmap_bus *regmap_get_slimbus(struct slim_device *slim,
 					const struct regmap_config *config)
