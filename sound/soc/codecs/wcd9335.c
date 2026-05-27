@@ -358,6 +358,19 @@ struct wcd9335_codec {
 	struct delayed_work port_monitor_work;
 	int port_monitor_port;
 	int port_monitor_count;
+
+	/*
+	 * Manager-side (AP) data ports allocated lazily on first hw_params
+	 * per direction. The controller's ->alloc_port callback returns the
+	 * SLIMbus port_b that the ADSP expects in master CONNECT messages
+	 * (wbuf[1]). 0xFF = not allocated yet.
+	 *
+	 * Allocating these here arms the corresponding BAM data pipes
+	 * before the codec CONNECT is sent so the hardware is ready
+	 * when the ADSP starts scheduling bus frames.
+	 */
+	u8 mgr_port_b_rx;
+	u8 mgr_port_b_tx;
 };
 
 struct wcd9335_irq {
@@ -383,12 +396,31 @@ static int wcd9335_ifc_read(struct wcd9335_codec *wcd, unsigned short reg,
 static int wcd9335_ifc_write(struct wcd9335_codec *wcd, unsigned short reg,
 			     u8 val)
 {
-	int ret;
+	int ret, retries;
 
-	ret = slim_write(wcd->slim_ifc_dev, 0x800 + reg, 1, &val);
-	dev_info(wcd->dev, "ifc_write: reg=0x%03x elem=0x%03x val=0x%02x ifc_la=%d ret=%d\n",
+	/*
+	 * IFC writes to the WCD9335 codec NACK intermittently on this
+	 * board. Downstream `wcd9xxx_interface_reg_write` retries; mirror
+	 * that. 5 attempts with 5 ms gaps gives ~25 ms worst-case
+	 * latency, which is acceptable inside hw_params.
+	 *
+	 * Verified 2026-05-26: PGD-prog writes for MULTI_CHANNEL/PORT_CFG
+	 * return -EIO (NACK) on first try; without retry the codec port
+	 * stays unconfigured and the SLIM data plane is dead (RMS=0,
+	 * PORT_STATUS=0x00). With retry, we expect at least one success
+	 * within the window.
+	 */
+	for (retries = 0; retries < 5; retries++) {
+		ret = slim_write(wcd->slim_ifc_dev, 0x800 + reg, 1, &val);
+		if (!ret)
+			break;
+		usleep_range(5000, 6000);
+	}
+
+	dev_info(wcd->dev, "ifc_write: reg=0x%03x elem=0x%03x val=0x%02x ifc_la=%d ret=%d (retries=%d)\n",
 		 reg, 0x800 + reg, val,
-		 wcd->slim_ifc_dev ? wcd->slim_ifc_dev->laddr : -1, ret);
+		 wcd->slim_ifc_dev ? wcd->slim_ifc_dev->laddr : -1,
+		 ret, retries);
 	return ret;
 }
 
@@ -1931,20 +1963,126 @@ static int wcd9335_hw_params(struct snd_pcm_substream *substream,
 		 * slim_connect_sink + slim_control_ch(ACTIVATE)) inside
 		 * hw_params, NOT in trigger().
 		 */
-		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
-		    dd->sruntime) {
-			int ret2 = slim_stream_prepare(dd->sruntime,
-						       &dd->sconfig);
+		/*
+		 * AP-side codec PGD port programming. Downstream
+		 * `wcd9xxx_cfg_slim_sch_{rx,tx}` in
+		 * techpack/audio/asoc/codecs/wcd9xxx-slimslave.c:208-432
+		 * writes per-stream MULTI_CHANNEL_0/1 + PORT_CFG via IFC
+		 * BEFORE slim_control_ch(ACTIVATE) (which is the equivalent of
+		 * slim_stream_enable). Without these writes the codec PGD
+		 * stays unconfigured even after AFE_PORT_CMD_DEVICE_START
+		 * returns OK — verified 2026-05-26: codec PORT_CFG=0x00,
+		 * MULTI_CH=0x00, NGD_PORT_STATUS=0x00, RMS=0 on whistled mic.
+		 *
+		 * Address arithmetic (Tasha-lite WCD9335 variant, slave-type
+		 * NOT 0, per wcd9xxx-slimslave.c:39-44):
+		 *   rx_port_ch_reg_base = 0x180 - 16*4 = 0x140
+		 *   port_rx_cfg_reg_base = 0x040 - 16   = 0x030
+		 *   port_tx_cfg_reg_base = 0x050
+		 * Producing:
+		 *   TX MULTI_CHANNEL_0 @ 0x100 + 4*codec_port
+		 *   TX MULTI_CHANNEL_1 @ 0x101 + 4*codec_port  (ports 8..15)
+		 *   TX PORT_CFG        @ 0x050 + codec_port
+		 *   RX MULTI_CHANNEL_0 @ 0x140 + 4*codec_port
+		 *   RX PORT_CFG        @ 0x030 + codec_port
+		 *
+		 * payload = OR of (1 << ch->shift) over all active channels
+		 * on this port. For our single-port mono test, payload =
+		 * 1 << 0 = 0x01 (chan shift comes from WCD9335_SLIM_*_CH macro).
+		 *
+		 * WATER_MARK_VAL = (WM_12bytes << 1) | ENABLE = 0x05.
+		 *
+		 * Per `memory/ifc_writes_actually_required.md`: earlier
+		 * session removed these claiming "downstream doesn't write
+		 * them either". That claim was wrong. Re-adding now.
+		 */
+		/*
+		 * PGD-prog (MULTI_CHANNEL + PORT_CFG via IFC) MOVED to
+		 * trigger() START callback.
+		 *
+		 * 2026-05-26: verified on-wire that wcd9335_ifc_write to
+		 * these addresses NACKs (-EIO, 5x retries) when called
+		 * before slim_stream_enable, but SUCCEEDS when called
+		 * after the SLIM stream is activated (the post-trigger
+		 * PORT_INT_CLR write at IFC reg=0x037 returned ret=0
+		 * with 0 retries in the same boot where the pre-stream
+		 * writes failed). The codec IFC interface only becomes
+		 * responsive to AP-side writes after the manager-port
+		 * CONNECT + DEF_ACT_CHAN sequence on the bus.
+		 */
+
+		/*
+		 * Activate the SLIMbus stream for BOTH playback and capture.
+		 * Previously this branch was gated on PLAYBACK only, leaving
+		 * mic capture without any DEF_ACT_CHAN / RECONFIG_NOW — so
+		 * the ADSP-side SLIMbus channel was never wired up, the codec
+		 * decimator path produced data but the bus never carried it,
+		 * and NGD_PORT_STATUS stayed 0x00. Verified by silent-mic
+		 * test 2026-05-25 (RMS=0). With capture also activating, the
+		 * controller's msm8953_slim_enable_stream runs DEF_ACT_CHAN +
+		 * REQ_BW + RECONFIG_NOW + (post-2026-05-26) BAM-arm path for
+		 * the TX direction.
+		 */
+		if (dd->sruntime) {
+			int ret2;
+			u8 *cached_port_b;
+
+			/*
+			 * Allocate a manager-side data port for this
+			 * direction before the codec CONNECT goes out, so
+			 * the AP-side BAM data pipe is armed when the ADSP
+			 * starts scheduling bus frames. Allocation is lazy
+			 * and cached per-direction: one mgr port for PLAYBACK,
+			 * one for CAPTURE.
+			 *
+			 * Controllers without manager-side port hardware
+			 * return -EOPNOTSUPP from slim_alloc_mgrports; in
+			 * that case we silently continue with the slave-only
+			 * path (existing behaviour).
+			 */
+			cached_port_b = (substream->stream ==
+					 SNDRV_PCM_STREAM_PLAYBACK)
+					? &wcd->mgr_port_b_rx
+					: &wcd->mgr_port_b_tx;
+
+			if (*cached_port_b == 0xFF) {
+				u8 port_b;
+
+				ret2 = slim_alloc_mgrports(wcd->slim, 1,
+							   &port_b);
+				if (!ret2) {
+					*cached_port_b = port_b;
+					dev_info(wcd->dev,
+						 "hw_params: allocated mgr port_b=%d for %s\n",
+						 port_b,
+						 substream->stream ==
+						 SNDRV_PCM_STREAM_PLAYBACK
+						 ? "PLAYBACK" : "CAPTURE");
+				} else if (ret2 != -EOPNOTSUPP) {
+					dev_warn(wcd->dev,
+						 "hw_params: slim_alloc_mgrports=%d (%s)\n",
+						 ret2,
+						 substream->stream ==
+						 SNDRV_PCM_STREAM_PLAYBACK
+						 ? "PLAYBACK" : "CAPTURE");
+				}
+			}
+
+			/*
+			 * slim_stream_prepare runs the codec-side CONNECT
+			 * message and is fine to do here. slim_stream_enable
+			 * (which fires DEF_ACT_CHAN and puts the codec PGD
+			 * into streaming mode, after which it NACKs control
+			 * writes) is DEFERRED to trigger() START so DAPM
+			 * has time to enable DEC1 / EAR PA on a quiescent
+			 * codec.
+			 */
+			ret2 = slim_stream_prepare(dd->sruntime,
+						   &dd->sconfig);
 			if (ret2)
 				dev_warn(wcd->dev,
-					 "hw_params: stream_prepare=%d\n", ret2);
-			else {
-				ret2 = slim_stream_enable(dd->sruntime);
-				if (ret2)
-					dev_warn(wcd->dev,
-						 "hw_params: stream_enable=%d\n",
-						 ret2);
-			}
+					 "hw_params: stream_prepare=%d (stream=%d)\n",
+					 ret2, substream->stream);
 		}
 	}
 
@@ -2067,6 +2205,76 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 				}
 			}
 
+			/*
+			 * PGD-prog: write codec port MULTI_CHANNEL + PORT_CFG
+			 * via IFC. Moved here from hw_params because IFC writes
+			 * NACK before the SLIM stream is activated (manager
+			 * port CONNECT + DEF_ACT_CHAN must land first). After
+			 * the trigger START path the IFC becomes responsive.
+			 *
+			 * Address map (Tasha-lite):
+			 *   TX MULTI_CHANNEL_0 @ 0x100 + 4*port
+			 *   TX MULTI_CHANNEL_1 @ 0x101 + 4*port
+			 *   TX PORT_CFG        @ 0x050 + port      (watermark+EN)
+			 *   RX MULTI_CHANNEL_0 @ 0x140 + 4*port
+			 *   RX PORT_CFG        @ 0x030 + port
+			 *
+			 * Payload = OR of (1 << ch->shift) across channels on
+			 * the port. Watermark value 0x05 = (12-byte WM << 1)
+			 * | ENABLE.
+			 */
+			{
+				struct wcd9335_slim_ch *ch;
+				u16 tx_payload_0 = 0, tx_payload_1 = 0;
+				u16 rx_payload = 0;
+				u8  tx_port_min = 0xFF, rx_port_min = 0xFF;
+				const u8 watermark_val = 0x05;
+
+				list_for_each_entry(ch, &dai_data->slim_ch_list, list) {
+					if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+						rx_payload |= 1 << ch->shift;
+						if (ch->port < rx_port_min)
+							rx_port_min = ch->port;
+					} else {
+						if (ch->shift < 8)
+							tx_payload_0 |= 1 << ch->shift;
+						else
+							tx_payload_1 |= 1 << (ch->shift - 8);
+						if (ch->port < tx_port_min)
+							tx_port_min = ch->port;
+					}
+				}
+
+				if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
+				    rx_port_min != 0xFF) {
+					int r1, r2;
+					u16 mc_addr = 0x140 + 4 * rx_port_min;
+					u16 cfg_addr = 0x030 + rx_port_min;
+
+					r1 = wcd9335_ifc_write(wcd, mc_addr, rx_payload & 0xFF);
+					r2 = wcd9335_ifc_write(wcd, cfg_addr, watermark_val);
+					dev_info(wcd->dev,
+						 "PGD-prog (trigger) RX port=%d MC@0x%03x=0x%02x (r=%d) CFG@0x%03x=0x%02x (r=%d)\n",
+						 rx_port_min, mc_addr, rx_payload & 0xFF, r1,
+						 cfg_addr, watermark_val, r2);
+				} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE &&
+					   tx_port_min != 0xFF) {
+					int r1, r2, r3;
+					u16 mc0_addr = 0x100 + 4 * tx_port_min;
+					u16 mc1_addr = 0x101 + 4 * tx_port_min;
+					u16 cfg_addr = 0x050 + tx_port_min;
+
+					r1 = wcd9335_ifc_write(wcd, mc0_addr, tx_payload_0 & 0xFF);
+					r2 = wcd9335_ifc_write(wcd, mc1_addr, tx_payload_1 & 0xFF);
+					r3 = wcd9335_ifc_write(wcd, cfg_addr, watermark_val);
+					dev_info(wcd->dev,
+						 "PGD-prog (trigger) TX port=%d MC0@0x%03x=0x%02x (r=%d) MC1@0x%03x=0x%02x (r=%d) CFG@0x%03x=0x%02x (r=%d)\n",
+						 tx_port_min, mc0_addr, tx_payload_0 & 0xFF, r1,
+						 mc1_addr, tx_payload_1 & 0xFF, r2,
+						 cfg_addr, watermark_val, r3);
+				}
+			}
+
 			/* Read mux config to verify RX0→INT0 routing */
 			regmap_read(wcd->regmap,
 				    WCD9335_CDC_RX_INP_MUX_RX_INT0_CFG0,
@@ -2079,11 +2287,21 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 				 mux_cfg0, mux_cfg1);
 
 			/*
-			 * slim_stream_prepare + slim_stream_enable moved
-			 * to hw_params so SLIMbus activation completes
-			 * before AFE DEVICE_START. Nothing to do here.
+			 * Activate the SLIM stream HERE (deferred from
+			 * hw_params). DEF_ACT_CHAN is the message that
+			 * puts the codec PGD into streaming mode, after
+			 * which it NACKs control writes. By moving this
+			 * to trigger START — AFTER the codec-side DAPM
+			 * widgets have already run their PRE_PMU writes
+			 * (DEC1 enable on TX_PATH_CTL bit 5, etc.) — we
+			 * leave the codec in a writable state long
+			 * enough for the analog/digital path to come up.
 			 */
-			ret2 = 0;
+			ret2 = slim_stream_enable(dai_data->sruntime);
+			if (ret2)
+				dev_warn(wcd->dev,
+					 "trigger START: slim_stream_enable=%d\n",
+					 ret2);
 
 			{
 				struct wcd9335_slim_ch *ch;
@@ -2668,6 +2886,24 @@ static const struct snd_soc_dapm_route wcd9335_audio_map[] = {
 	{ "ADC4", NULL, "AMIC4" },
 	{ "ADC5", NULL, "AMIC5" },
 	{ "ADC6", NULL, "AMIC6" },
+
+	/*
+	 * DMIC supply routes. Each DMIC requires MIC BIAS to power the
+	 * physical microphone clock/data pins. Without these routes, the
+	 * DMIC widget powers on but MIC BIAS stays off → no signal on the
+	 * codec pin → DEC1 captures silence → arecord returns RMS=0.
+	 *
+	 * FP3+ specific mapping (per lineageos_mic_routing.md):
+	 *   DMIC0/DMIC1 → MIC BIAS1 (main mic pair, board-internal DMIC1)
+	 *   DMIC2/DMIC3 → MIC BIAS3 (secondary mic pair)
+	 *   DMIC4/DMIC5 → MIC BIAS4 (reserved, kept consistent for safety)
+	 */
+	{ "DMIC0", NULL, "MIC BIAS1" },
+	{ "DMIC1", NULL, "MIC BIAS1" },
+	{ "DMIC2", NULL, "MIC BIAS3" },
+	{ "DMIC3", NULL, "MIC BIAS3" },
+	{ "DMIC4", NULL, "MIC BIAS4" },
+	{ "DMIC5", NULL, "MIC BIAS4" },
 };
 
 static int wcd9335_micbias_control(struct snd_soc_component *component,
@@ -5328,6 +5564,8 @@ static int wcd9335_probe(struct wcd9335_codec *wcd)
 	}
 
 	wcd->sido_voltage = SIDO_VOLTAGE_NOMINAL_MV;
+	wcd->mgr_port_b_rx = 0xFF;
+	wcd->mgr_port_b_tx = 0xFF;
 
 	return devm_snd_soc_register_component(dev, &wcd9335_component_drv,
 					       wcd9335_slim_dais,
@@ -5385,6 +5623,14 @@ static const struct regmap_range_cfg wcd9335_ranges[] = {
 static bool wcd9335_is_volatile_register(struct device *dev, unsigned int reg)
 {
 	switch (reg) {
+	/*
+	 * 2026-05-26 diagnostic: SEL_REGISTER volatile reverted while
+	 * investigating ADSP boot crash. Volatile + 0x800 short-circuit
+	 * causes ADSP to crash and recovery to fail. The short-circuit
+	 * alone is fine for ADSP but cset doesn't propagate.
+	 * See adsp_boot_crash_diagnostic.md.
+	 */
+	/* case WCD9335_SEL_REGISTER: */
 	case WCD9335_INTR_PIN1_STATUS0 ... WCD9335_INTR_PIN2_CLEAR3:
 	case WCD9335_ANA_MBHC_RESULT_3:
 	case WCD9335_ANA_MBHC_RESULT_2:
@@ -5401,14 +5647,43 @@ static bool wcd9335_is_volatile_register(struct device *dev, unsigned int reg)
 	}
 }
 
+/*
+ * Pre-populate the regmap cache for the page selector at 0x800.
+ *
+ * regmap's _regmap_select_page does a read-modify-write of the selector
+ * register before switching pages. The WCD9335 codec at LA=200 NACKs
+ * reads of 0x800 (the page register is write-only on the hardware), so
+ * without a cached value every paged register access fails with -EIO
+ * and DAPM enum kcontrols (ADC MUX1, DMIC MUX1, SLIM TX1 MUX, ...) get
+ * silently rejected: cset appears to succeed but the value never
+ * changes, leaving the mic capture path inactive.
+ *
+ * Seeding the cache with 0x00 means regmap can do its RMW from the
+ * cache instead of issuing an unanswerable bus read. The actual page
+ * write still goes out (verified in regmap-slim TX log).
+ *
+ * Verified on-wire (LA=200 PGD):
+ *   read addr=0x800 -> -EIO (5 retries, all NACK)  -- before fix
+ *   read addr=0x800 -> cache hit, no bus traffic    -- after fix
+ */
+static const struct reg_default wcd9335_reg_defaults[] = {
+	{ WCD9335_SEL_REGISTER, 0x00 },
+};
+
 static const struct regmap_config wcd9335_regmap_config = {
 	.reg_bits = 16,
 	.val_bits = 8,
 	.cache_type = REGCACHE_MAPLE,
 	.max_register = WCD9335_MAX_REGISTER,
 	.can_multi_write = true,
-	.ranges = wcd9335_ranges,
-	.num_ranges = ARRAY_SIZE(wcd9335_ranges),
+	/*
+	 * .ranges intentionally omitted — paging is handled manually by
+	 * regmap_init_slimbus_paged(). regmap_range_cfg auto-paging does
+	 * an RMW on the page selector at 0x800 which the codec NACKs
+	 * (write-only register), silently breaking every paged DAPM
+	 * kcontrol. With the paged bus, virtual addresses 0xPPOO map to
+	 * SLIMbus addr 0x800+OO after writing PP to 0x800.
+	 */
 	.volatile_reg = wcd9335_is_volatile_register,
 };
 
@@ -5657,10 +5932,32 @@ static int wcd9335_slim_probe(struct slim_device *slim)
 	if (ret)
 		return ret;
 
+	/*
+	 * The WCD9335 has six analog/digital power rails (vdd-buck,
+	 * vdd-buck-sido, vdd-tx, vdd-rx, vdd-io, vdd-micbias). They were
+	 * acquired via devm_regulator_bulk_get() above but NEVER enabled,
+	 * so the codec's SLIMbus interface ran on whatever residual power
+	 * the rails happened to have from other consumers — enough for the
+	 * IFC (LA=199) to ACK, but the PGD (LA=200) NACKed every register
+	 * access (-EIO), making codec init / DAPM / data plane silently
+	 * dead. Enable them BEFORE the reset toggle and MCLK so the codec
+	 * comes up correctly. /sys/kernel/debug/regulator/regulator_summary
+	 * showed 217:1a0:1:0-vdd-* use_count=0 across the board, confirming
+	 * this.
+	 */
+	ret = regulator_bulk_enable(ARRAY_SIZE(wcd9335_supplies),
+				    wcd->supplies);
+	if (ret) {
+		dev_err(dev, "failed to enable codec supplies: %d\n", ret);
+		return ret;
+	}
+	/* Per datasheet: 600us for Vout_A/D to settle after BUCK_SIDO up. */
+	usleep_range(800, 1000);
+
 	ret = clk_prepare_enable(wcd->mclk);
 	if (ret) {
 		dev_err(dev, "failed to enable mclk: %d\n", ret);
-		return ret;
+		goto disable_supplies;
 	}
 
 	/* WCD9335 requires 9.6MHz MCLK — must set AFTER enable (RPM clk
@@ -5693,6 +5990,8 @@ disable_native_clk:
 	clk_disable_unprepare(wcd->native_clk);
 disable_mclk:
 	clk_disable_unprepare(wcd->mclk);
+disable_supplies:
+	regulator_bulk_disable(ARRAY_SIZE(wcd9335_supplies), wcd->supplies);
 
 	return ret;
 }
@@ -5768,7 +6067,13 @@ static int wcd9335_slim_status(struct slim_device *sdev,
 	 * find the actually-offending DAPM write without breaking the
 	 * regmap architecture.
 	 */
-	wcd->regmap = regmap_init_slimbus(sdev, &wcd9335_regmap_config);
+	/*
+	 * Use the paged variant so the bus handles page navigation
+	 * itself, bypassing regmap_range_cfg's broken-by-codec RMW
+	 * on the write-only page register at 0x800. See
+	 * drivers/base/regmap/regmap-slimbus.c.
+	 */
+	wcd->regmap = regmap_init_slimbus_paged(sdev, &wcd9335_regmap_config);
 	if (IS_ERR(wcd->regmap))
 		return dev_err_probe(dev, PTR_ERR(wcd->regmap),
 				     "Failed to allocate slim register map\n");

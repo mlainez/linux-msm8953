@@ -201,8 +201,19 @@ EXPORT_SYMBOL_GPL(slim_do_transfer);
 static int slim_val_inf_sanity(struct slim_controller *ctrl,
 			       struct slim_val_inf *msg, u8 mc)
 {
+	/*
+	 * SLIMbus VE addresses are 12-bit on the wire (see slim_xfer_msg:
+	 * ec = (... | ((start_offset & 0xFFF) << 4))). The Qualcomm WCD9335
+	 * codec exposes its full 16-bit codec register window at SLIMbus
+	 * value-element offset 0x800 (TASHA_REGISTER_START_OFFSET in
+	 * downstream techpack/audio/asoc/codecs/wcd9xxx-core.c), so callers
+	 * pass start_offset values up to 0x800 + 0xFFF = 0x17FF. The original
+	 * 0xC00 cap rejected everything past codec page 0x04, which broke
+	 * every analog/DAC/ADC register touch. Use the actual 12-bit hardware
+	 * limit (0x1000) instead.
+	 */
 	if (!msg || msg->num_bytes > 16 ||
-	    (msg->start_offset + msg->num_bytes) > 0xC00)
+	    ((msg->start_offset & 0xFFF) + msg->num_bytes) > 0x1000)
 		goto reterr;
 	switch (mc) {
 	case SLIM_MSG_MC_REQUEST_VALUE:

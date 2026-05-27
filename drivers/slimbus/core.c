@@ -306,6 +306,83 @@ int slim_unregister_controller(struct slim_controller *ctrl)
 EXPORT_SYMBOL_GPL(slim_unregister_controller);
 
 /**
+ * slim_alloc_mgrports() - allocate manager-side data ports
+ *
+ * @sb: client (codec) slim device requesting ports
+ * @nports: number of manager-side ports to allocate
+ * @ports: caller-provided array, filled in with the manager-side
+ *	port numbers (port_b) on success
+ *
+ * Some Qualcomm controllers (e.g. msm8953 NGD) own physical data
+ * pipes on the AP side of the bus. A codec stream typically needs
+ * both a slave-side port (allocated by stream_prepare) and a
+ * manager-side port (allocated here) connected to the same channel.
+ *
+ * Controllers without manager-side data ports leave ->alloc_port
+ * NULL; this call then returns -EOPNOTSUPP and the codec driver
+ * should fall back to its slave-only path.
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int slim_alloc_mgrports(struct slim_device *sb, unsigned int nports,
+			u8 *ports)
+{
+	struct slim_controller *ctrl = sb->ctrl;
+	unsigned int i;
+	int ret;
+
+	if (!ctrl || !ports || nports == 0)
+		return -EINVAL;
+	if (!ctrl->alloc_port)
+		return -EOPNOTSUPP;
+
+	for (i = 0; i < nports; i++) {
+		ret = ctrl->alloc_port(ctrl, &ports[i]);
+		if (ret) {
+			/* Roll back successfully-allocated ports */
+			while (i-- > 0) {
+				if (ctrl->dealloc_port)
+					ctrl->dealloc_port(ctrl, ports[i]);
+			}
+			return ret;
+		}
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(slim_alloc_mgrports);
+
+/**
+ * slim_dealloc_mgrports() - release manager-side data ports
+ *
+ * @sb: client slim device that previously called slim_alloc_mgrports
+ * @nports: number of ports in @ports
+ * @ports: array of port_b values returned by slim_alloc_mgrports
+ *
+ * Return: 0 on success, negative errno on failure (-EOPNOTSUPP if the
+ * controller doesn't manage manager-side ports).
+ */
+int slim_dealloc_mgrports(struct slim_device *sb, unsigned int nports,
+			  u8 *ports)
+{
+	struct slim_controller *ctrl = sb->ctrl;
+	unsigned int i;
+	int ret = 0, last_err = 0;
+
+	if (!ctrl || !ports)
+		return -EINVAL;
+	if (!ctrl->dealloc_port)
+		return -EOPNOTSUPP;
+
+	for (i = 0; i < nports; i++) {
+		ret = ctrl->dealloc_port(ctrl, ports[i]);
+		if (ret)
+			last_err = ret;
+	}
+	return last_err;
+}
+EXPORT_SYMBOL_GPL(slim_dealloc_mgrports);
+
+/**
  * slim_report_absent() - Controller calls this function when a device
  *	reports absent, OR when the device cannot be communicated with
  *

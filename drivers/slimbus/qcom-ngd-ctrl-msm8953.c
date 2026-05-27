@@ -408,6 +408,23 @@ struct msm8953_slim_ctrl {
 	dma_addr_t data_buf_phys[2];
 	bool data_pipe_armed[2];
 
+	/*
+	 * Manager-side (AP) data port allocation. Each set bit in
+	 * apps_pipes (bits 7..31) is a data pipe owned by the AP. We
+	 * hand them out one-at-a-time via alloc_port; each allocation
+	 * also arms the corresponding BAM data pipe so the hardware is
+	 * ready before the first SLIM frame arrives.
+	 *
+	 * mgrport_alloc_mask: bit set if apps_pipes-bit was handed out.
+	 *   port_b = bit - 7 is the manager-side SLIMbus port number
+	 *   used in USR CONNECT messages.
+	 * mgrport_count: number of currently-allocated mgr ports.
+	 *   doubles as the "port_idx" passed to enable_pgd_port /
+	 *   arm_data_pipe (0 for first allocation, 1 for second, ...).
+	 */
+	u32 mgrport_alloc_mask;
+	u8 mgrport_count;
+
 #ifdef CONFIG_DEBUG_FS
 	struct dentry *debugfs_root;
 	/* Message trace ring buffer */
@@ -974,15 +991,20 @@ static int msm8953_slim_arm_data_pipe(struct msm8953_slim_ctrl *dev,
 	if (dev->data_pipe_armed[port_idx])
 		return 0;
 
-	/* Get BAM pipe index from PGD port STAT */
+	/*
+	 * For AP-side data ports the BAM pipe number is just the
+	 * apps_pipes bit position (== pgd_port here): the DTS pairs
+	 * `data-port0` with `<&slimbam 21>` and `data-port1` with
+	 * `<&slimbam 22>`, matching apps_pipes bits 21 and 22 on
+	 * FP3+. PGD_PORT_STATn is populated by the ADSP for codec-side
+	 * ports, not AP-side, so reading it here always returned 0 ->
+	 * -ENODEV. Keep the read as a sanity-log only.
+	 */
 	stat = readl_relaxed(dev->base + PGD_PORT_STATn(pgd_port));
-	bam_pipe = (stat >> 4) & 0xFF;
-	if (bam_pipe == 0) {
-		dev_warn(dev->dev,
-			 "PGD port %d: no BAM pipe in STAT=0x%x\n",
-			 pgd_port, stat);
-		return -ENODEV;
-	}
+	bam_pipe = pgd_port;
+	dev_dbg(dev->dev,
+		 "BAM arm: ap_pgd_port=%d bam_pipe=%d STATn=0x%x\n",
+		 pgd_port, bam_pipe, stat);
 
 	ctrl = readl_relaxed(dev->bam_base + BAM17_P_CTRL(bam_pipe));
 	desc_addr = readl_relaxed(dev->bam_base +
@@ -1115,6 +1137,114 @@ static int msm8953_slim_enable_pgd_port(struct msm8953_slim_ctrl *dev,
 }
 
 /*
+ * msm8953_slim_alloc_port - controller ->alloc_port callback
+ *
+ * Hands out the next free manager-side data port from the apps_pipes
+ * bitmap, programs the PGD port and arms the corresponding BAM data
+ * pipe.  Returns the SLIMbus port number ("port_b") in *port_out so
+ * the caller can use it in USR CONNECT messages addressed to the
+ * manager (e.g. wbuf[1] of a master CONNECT_SRC/SINK).
+ *
+ * apps_pipes bits 7..31 enumerate AP-owned data pipes; port_b for
+ * the n-th set bit is (bit - 7).  Each allocation also arms the
+ * BAM pipe so the hardware is ready before the first SLIM frame
+ * arrives.
+ */
+static int msm8953_slim_alloc_port(struct slim_controller *ctrl, u8 *port_out)
+{
+	struct msm8953_slim_ctrl *dev =
+		container_of(ctrl, struct msm8953_slim_ctrl, ctrl);
+	int bit;
+	int port_idx;
+	u8 port_b;
+	int ret;
+
+	if (!port_out)
+		return -EINVAL;
+	if (!dev->apps_pipes) {
+		dev_err(dev->dev,
+			"alloc_port: no apps_pipes (DT missing qcom,apps-ch-pipes?)\n");
+		return -ENODEV;
+	}
+
+	mutex_lock(&dev->tx_lock);
+
+	/* Find the lowest apps_pipes bit not yet handed out. */
+	for (bit = 7; bit < 32; bit++) {
+		if (!(dev->apps_pipes & (1u << bit)))
+			continue;
+		if (dev->mgrport_alloc_mask & (1u << bit))
+			continue;
+		break;
+	}
+	if (bit >= 32) {
+		mutex_unlock(&dev->tx_lock);
+		dev_err(dev->dev,
+			"alloc_port: no free mgr port (apps_pipes=0x%x alloc=0x%x)\n",
+			dev->apps_pipes, dev->mgrport_alloc_mask);
+		return -EBUSY;
+	}
+
+	port_b   = (u8)(bit - 7);
+	port_idx = dev->mgrport_count;
+
+	/*
+	 * Just track the allocation; don't touch PGD_PORT_CFGn here.
+	 * Downstream's msm_alloc_port mirrors this minimalism — it only
+	 * registers the AP-side BAM endpoint. The actual PGD register
+	 * programming and BAM-pipe-arm happen later in enable_stream,
+	 * AFTER the SLIM CONNECT/DEF_ACT_CHAN sequence. Writing
+	 * PGD_PORT_CFGn early collides with the ADSP's view of the
+	 * port (the comment near xfer_msg's CONNECT branch warns that
+	 * 'Writing PGD_PORT_CFGn from the apps side for audio ports
+	 * causes I/O errors by conflicting with the ADSP'). The early
+	 * arm we tried first made AFE DEVICE_START (cmd 0x100e5) return
+	 * DSP error 0x1.
+	 */
+
+	dev->mgrport_alloc_mask |= (1u << bit);
+	dev->mgrport_count++;
+	mutex_unlock(&dev->tx_lock);
+
+	*port_out = port_b;
+	dev_info(dev->dev,
+		 "alloc_port: handed out port_b=%d (bit=%d port_idx=%d apps_pipes=0x%x)\n",
+		 port_b, bit, port_idx, dev->apps_pipes);
+	return 0;
+}
+
+/*
+ * msm8953_slim_dealloc_port - controller ->dealloc_port callback
+ *
+ * Reverse of alloc_port: marks the bit free, leaves the BAM pipe
+ * state in place (it will be torn down during shutdown).  Callers
+ * are not expected to allocate and free repeatedly during a session.
+ */
+static int msm8953_slim_dealloc_port(struct slim_controller *ctrl, u8 port_b)
+{
+	struct msm8953_slim_ctrl *dev =
+		container_of(ctrl, struct msm8953_slim_ctrl, ctrl);
+	int bit = port_b + 7;
+
+	if (bit < 7 || bit >= 32)
+		return -EINVAL;
+
+	mutex_lock(&dev->tx_lock);
+	if (!(dev->mgrport_alloc_mask & (1u << bit))) {
+		mutex_unlock(&dev->tx_lock);
+		return -ENOENT;
+	}
+	dev->mgrport_alloc_mask &= ~(1u << bit);
+	if (dev->mgrport_count)
+		dev->mgrport_count--;
+	mutex_unlock(&dev->tx_lock);
+
+	dev_info(dev->dev, "dealloc_port: freed port_b=%d (bit=%d)\n",
+		 port_b, bit);
+	return 0;
+}
+
+/*
  * msm8953_slim_ngd_setup - program NGD registers and enable the controller
  *
  * After the ADSP crashes and restarts, it resets the SLIMbus hardware block.
@@ -1129,6 +1259,19 @@ static int msm8953_slim_ngd_setup(struct msm8953_slim_ctrl *dev)
 {
 	void __iomem *ngd = ngd_base(dev);
 	u32 rx_msgq, cfg_readback;
+	/*
+	 * Both RX_MSGQ_EN and TX_MSGQ_EN set. ADSP firmware appears to
+	 * gate its QMI satellite handshake on seeing TX_MSGQ_EN at NGD
+	 * power-on (a globally-cleared TX_MSGQ_EN hangs early boot, no
+	 * USB net comes up). USR messages stay on BAM TX (their normal
+	 * path to the ADSP).
+	 *
+	 * For codec-bound MT_CORE messages (REQUEST/CHANGE_VALUE), we
+	 * toggle TX_MSGQ_EN off per-write in xfer_msg, do the AHB write
+	 * to NGD_TX_MSG, then toggle TX_MSGQ_EN back on. The ADSP would
+	 * otherwise drop those frames (adsp_sat_dispatcher @ 0xf04ca424
+	 * silently discards MT=0 MC!=0x29). See codec_pgd_via_ahb_finding.md.
+	 */
 	u32 cfg_val = NGD_CFG_ENABLE | NGD_CFG_RX_MSGQ_EN | NGD_CFG_TX_MSGQ_EN;
 	int i;
 
@@ -1139,10 +1282,6 @@ static int msm8953_slim_ngd_setup(struct msm8953_slim_ctrl *dev)
 		       ngd + NGD_RX_MSGQ_CFG);
 
 	/*
-	 * Enable both RX and TX MSGQ. The ADSP needs to see TX_MSGQ_EN
-	 * to set up the BAM TX pipe. REPORT_SATELLITE temporarily
-	 * disables TX_MSGQ_EN to send via AHB.
-	 *
 	 * Poll NGD_CFG after writing: if the ADSP is still resetting the
 	 * SLIMbus hardware, writes are silently dropped (readback = 0).
 	 * Give it up to ~50ms (10 x 5ms) for the ADSP to release the
@@ -1342,6 +1481,153 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 	 */
 
 	/*
+	 * AP-side master-port allocation (2026-05-26).
+	 *
+	 * Per ADSP firmware RE: the bus master tracks "master ports"
+	 * (AP-side BAM endpoints) separately from "slave ports" (codec
+	 * endpoints). Each channel needs BOTH allocated for the frame
+	 * scheduler to drive data.
+	 *
+	 * Downstream `slim-msm-ngd.c:670` handles this implicitly: when a
+	 * CONNECT message has `wbuf[0] == dev->pgdla` (= SLIM_LA_MGR
+	 * = 0xFF), downstream allocates the AP-side BAM pipe and lets the
+	 * frame go out on the bus to the manager. The ADSP responds by
+	 * binding the manager-side endpoint to the channel.
+	 *
+	 * Mainline's slim core only sends ONE CONNECT per stream port —
+	 * with `wbuf[0] = codec_la` (the codec endpoint). It never tells
+	 * the ADSP about the AP-side endpoint. Without that, the ADSP
+	 * knows the codec is supposed to send/receive but has no AP
+	 * endpoint to direct frames to, so PORT_STATUS stays 0x00.
+	 *
+	 * Fix: inject an additional CONNECT for the AP-master side, in
+	 * the OPPOSITE direction of the codec's CONNECT.
+	 *   codec CONNECT_SRC  (TX / mic):  AP needs CONNECT_SINK
+	 *   codec CONNECT_SINK (RX / play): AP needs CONNECT_SRC
+	 *
+	 * Master-port number = BAM pipe assigned by HW in PGD_PORT_STATn
+	 * register, bits [11:4]. Must be read after enable_pgd_port runs
+	 * (which programs PGD_PORT_CFGn).
+	 *
+	 * See memory/master_port_connect_missing.md for the analysis.
+	 */
+	/*
+	 * Compute manager port_b values from apps_pipes bitmap.
+	 *
+	 * Per downstream `slim-msm.c:1101-1113` (msm_slim_data_port_assign):
+	 *   First 7 BAM pipes are reserved for message queues. Iterate
+	 *   apps_pipes bits 7..31; each set bit is a data pipe. The
+	 *   data_port index (0, 1, ...) is assigned in order, and
+	 *   port_b = bit_position - 7. port_b is the SLIMbus manager-side
+	 *   port number used in USR CONNECT messages addressed to MGR.
+	 *
+	 * On FP3+ DT: qcom,apps-ch-pipes = 0x6000 → bits 13, 14 set.
+	 *   data_port 0 → port_b = 13 - 7 = 6
+	 *   data_port 1 → port_b = 14 - 7 = 7
+	 */
+	for (i = 0; i < rt->num_ports && i < 2; i++) {
+		struct slim_port *port = &rt->ports[i];
+		u8  port_b;
+		u8  master_mbuf[4];
+		struct slim_val_inf master_msg = {0, 3, NULL, master_mbuf, NULL};
+		struct slim_msg_txn master_txn = {0};
+		DECLARE_COMPLETION_ONSTACK(master_done);
+		int mret, bit, found = 0, data_idx = 0;
+
+		if (port->ch.id < 128) {
+			dev_warn(&sdev->dev,
+				 "MasterCONNECT: skipping unmapped ch.id=%d\n",
+				 port->ch.id);
+			continue;
+		}
+
+		/* Walk apps_pipes to find the i-th data port's port_b. */
+		port_b = 0xFF;
+		for (bit = 7; bit < 32; bit++) {
+			if (!(dev->apps_pipes & (1u << bit)))
+				continue;
+			if (data_idx == i) {
+				port_b = bit - 7;
+				found = 1;
+				break;
+			}
+			data_idx++;
+		}
+		if (!found) {
+			dev_warn(&sdev->dev,
+				 "MasterCONNECT: no apps_pipes slot for port[%d] (apps_pipes=0x%x)\n",
+				 i, dev->apps_pipes);
+			continue;
+		}
+
+		master_txn.mt = SLIM_MSG_MT_DEST_REFERRED_USER;
+		master_txn.dt = SLIM_MSG_DEST_LOGICALADDR;
+		master_txn.la = SLIM_LA_MGR;
+		master_txn.msg = &master_msg;
+
+		/*
+		 * Direction: opposite of the codec's port direction.
+		 * port->direction == SLIM_PORT_SOURCE means codec is source,
+		 * so AP is sink → AP CONNECT_SINK.
+		 * port->direction == SLIM_PORT_SINK means codec is sink,
+		 * so AP is source → AP CONNECT_SRC.
+		 */
+		if (port->direction == SLIM_PORT_SOURCE)
+			master_txn.mc = SLIM_USR_MC_CONNECT_SINK;
+		else
+			master_txn.mc = SLIM_USR_MC_CONNECT_SRC;
+
+		/*
+		 * Downstream `slim-msm-ngd.c` lines 565-590 rewrite the
+		 * outgoing txn->la from SLIM_LA_MGR (0xff) to dev->pgdla,
+		 * which is resolved by get_laddr() to the *codec* PGD's
+		 * logical address (e.g. 200 for WCD9335). The on-wire
+		 * wbuf[0] for a master CONNECT is therefore the codec
+		 * laddr, NOT the manager laddr. Sending 0xff here was a
+		 * misreading of the downstream variable name and is most
+		 * likely what causes the ADSP to silently drop the
+		 * master CONNECT (matching the -110 timeout we see).
+		 */
+		master_mbuf[0] = sdev->laddr;       /* codec PGD laddr */
+		master_mbuf[1] = port_b;            /* manager-side SLIMbus port */
+		master_mbuf[2] = port->ch.id;       /* channel id */
+
+		mret = slim_alloc_txn_tid(ctrl, &master_txn);
+		if (mret) {
+			dev_warn(&sdev->dev,
+				 "MasterCONNECT: TID alloc fail ret=%d\n", mret);
+			continue;
+		}
+		master_mbuf[3] = master_txn.tid;
+		master_msg.num_bytes = 4;
+		master_txn.rl = master_msg.num_bytes + 4;
+		master_txn.comp = &master_done;
+
+		dev_info(ctrl->dev,
+			 "MasterCONNECT: mc=0x%x la=MGR(0xFF) port_b=%d chan=%d tid=%d (codec %s, apps_pipes=0x%x)\n",
+			 master_txn.mc, port_b, port->ch.id, master_txn.tid,
+			 (port->direction == SLIM_PORT_SOURCE) ? "SOURCE" : "SINK",
+			 dev->apps_pipes);
+
+		/*
+		 * Use xfer_msg directly, NOT xfer_msg_sync. xfer_msg has its
+		 * own internal ACK wait for USR_MC_CONNECT_* (lines 2302+)
+		 * that consumes txn->comp. xfer_msg_sync would then try to
+		 * wait again on the already-consumed completion and time
+		 * out — exactly the -110 we used to see on every master
+		 * CONNECT despite the ADSP ACKing in <1 ms (verified in
+		 * msg_log: 'TX 47 2c ff c8 0e ... / RX c5 25 ff <tid> 20').
+		 */
+		mret = msm8953_slim_xfer_msg(ctrl, &master_txn);
+		if (mret) {
+			slim_free_txn_tid(ctrl, &master_txn);
+			dev_warn(&sdev->dev,
+				 "MasterCONNECT failed: %d (port_b=%d chan=%d)\n",
+				 mret, port_b, port->ch.id);
+		}
+	}
+
+	/*
 	 * Send REQ_BW (mc=0x28) to request bandwidth allocation from the
 	 * ADSP master. Without this, the ADSP creates channels via
 	 * DEF_ACT_CHAN but never allocates bus frame slots for them,
@@ -1467,6 +1753,65 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 	}
 
 	/*
+	 * After RECONFIG_NOW: the ADSP has accepted the channel set and
+	 * has now assigned a BAM pipe to each AP-side data port (port_b).
+	 * Arm those pipes so the AP can actually move audio bytes.
+	 *
+	 * IMPORTANT: BAM data pipes live on the AP-side PGD port whose
+	 * number equals the apps_pipes bit position (21 or 22 on FP3+),
+	 * NOT the codec PGD port (16 for RX0 etc.). Calling
+	 * enable_pgd_port / arm_data_pipe with the codec port number
+	 * (port->ch.id - 128) was a long-standing bug: it wrote unused
+	 * NGD registers and then tried to read PGD_PORT_STATn(codec_port)
+	 * which is always 0 → arm_data_pipe failed with -ENODEV.
+	 *
+	 * Walk apps_pipes the same way alloc_port does; the i-th set bit
+	 * is the AP-side PGD port number for the i-th data port of this
+	 * stream. port_b = bit - 7 is what was sent in the master
+	 * CONNECT message (verified by the msg_log: "47 2c ff c8 0e..."
+	 * where 0e = port_b=14, bit=21).
+	 *
+	 * port_idx is the local 0/1 slot tracking AP-side BAM pipes
+	 * (DTS dmas "data-port0"/"data-port1"). Limit to first 2 ports.
+	 */
+	{
+		int bit, data_idx = 0;
+
+		for (bit = 7; bit < 32 && data_idx < rt->num_ports && data_idx < 2;
+		     bit++) {
+			u8 ap_pgd_port;
+			int aret;
+
+			if (!(dev->apps_pipes & (1u << bit)))
+				continue;
+			ap_pgd_port = (u8)bit;	/* AP-side PGD port number */
+
+			dev_info(&sdev->dev,
+				 "BAM arm: data_idx=%d ap_pgd_port=%d (port_b=%d) port_idx=%d\n",
+				 data_idx, ap_pgd_port, ap_pgd_port - 7,
+				 data_idx);
+
+			aret = msm8953_slim_enable_pgd_port(dev, ap_pgd_port,
+							    data_idx);
+			if (aret) {
+				dev_warn(&sdev->dev,
+					 "BAM arm: enable_pgd_port pgd=%d ret=%d\n",
+					 ap_pgd_port, aret);
+				data_idx++;
+				continue;
+			}
+			aret = msm8953_slim_arm_data_pipe(dev, data_idx,
+							  ap_pgd_port);
+			if (aret) {
+				dev_warn(&sdev->dev,
+					 "BAM arm: arm_data_pipe pgd=%d ret=%d\n",
+					 ap_pgd_port, aret);
+			}
+			data_idx++;
+		}
+	}
+
+	/*
 	 * Do NOT send CORE BEGIN_RECONFIG / DEFINE_CONTENT / ACTIVATE /
 	 * RECONFIGURE_NOW via raw BAM TX. Verified by ADSP firmware RE:
 	 * the satellite dispatcher drops all CORE messages. The NGD
@@ -1523,10 +1868,12 @@ retry:
 	dev->err = 0;
 
 	/*
-	 * Send REPORT_SATELLITE via BAM TX if available (matching
-	 * downstream behavior). The ADSP expects REPORT_SATELLITE
-	 * through the BAM TX pipe when TX_MSGQ_EN is set.
-	 * Fall back to AHB TX (with TX_MSGQ_EN temporarily disabled).
+	 * Send REPORT_SATELLITE via BAM TX if available. The ADSP expects
+	 * to receive REPORT_SATELLITE during the QMI satellite handshake
+	 * (BAM TX is the normal AP→ADSP control path).
+	 *
+	 * If BAM TX isn't available, fall back to AHB by temporarily
+	 * clearing TX_MSGQ_EN, doing the AHB write, then restoring it.
 	 */
 	if (dev->use_bam_tx) {
 		ret = msm8953_slim_bam_tx(dev, buf, 7);
@@ -1538,6 +1885,8 @@ retry:
 		mb();
 		ret = msm8953_slim_ahb_tx(dev, buf, 7,
 					  NGD_BASE(dev->ctrl_nr) + NGD_TX_MSG);
+		writel_relaxed(cfg | NGD_CFG_TX_MSGQ_EN, ngd + NGD_CFG);
+		mb();
 	}
 	if (ret)
 		goto out;
@@ -1569,15 +1918,6 @@ retry:
 	}
 
 	dev_info(dev->dev, "SLIM SAT: REPORT_SATELLITE sent successfully\n");
-
-	/* Re-enable TX_MSGQ_EN if we disabled it for AHB fallback */
-	if (!dev->use_bam_tx) {
-		void __iomem *ngd = ngd_base(dev);
-		u32 cfg = readl_relaxed(ngd + NGD_CFG);
-
-		writel_relaxed(cfg | NGD_CFG_TX_MSGQ_EN, ngd + NGD_CFG);
-		mb();
-	}
 
 out:
 	dev->wr_comp = NULL;
@@ -1641,7 +1981,41 @@ capability_retry:
 		return -ETIMEDOUT;
 	}
 
-	timeout = wait_for_completion_timeout(&dev->reconf, HZ);
+	/*
+	 * ADSP cold-boot timing fix (2026-05-26):
+	 *
+	 * Observed timeline on intermittent cold boots:
+	 *   t=3.92s  ADSP comes up (first time)
+	 *   t=5.06s  ADSP crashes "Excep:0:Exception detected"
+	 *   t=5.40s  ADSP recovers (second UP)
+	 *   t=~6.0s  Our PDR UP handler schedules ngd_up_work
+	 *   t=~6.0s  ngd_enable runs, power_up calls PM_ACTIVE, MCAP starts
+	 *   t=7.02s  First MCAP timeout — ADSP not ready
+	 *   t=12.5s  All 5 MCAP retries fail → -ETIMEDOUT
+	 *   t=44s    Next ngd_up_work retry blocks 30s on qmi_up
+	 *   t=160s+  All worker retries exhausted, soundcard never appears
+	 *
+	 * Root cause: ADSP's SLIMbus subsystem is NOT actually ready
+	 * 600ms after PDR fires SERVICE_STATE_UP. The audio PDR service
+	 * comes up earlier than the bus manager. We were sending
+	 * REPORT_SATELLITE / waiting MCAP before the ADSP could respond.
+	 *
+	 * Fix: bump the FIRST MCAP wait from 1 s to 3 s. The actual
+	 * latency between PDR UP and ADSP-ready is usually under 1 s,
+	 * but on cold boots after the recovery cycle it can exceed
+	 * 1 s. Subsequent retries keep the 1 s wait — if MCAP is going
+	 * to fire, it does so quickly once ADSP is actually settled.
+	 *
+	 * Also extend the post-NGD_CFG-cleared backoff from 50 ms to
+	 * 500 ms. When NGD_CFG == 0 after timeout, the ADSP visibly
+	 * reset the HW — give it real time to come back rather than
+	 * burning the next 1 s waiting on a still-unresponsive ADSP.
+	 */
+	{
+		unsigned long initial_to = (mcap_retries == 0) ? 3 * HZ : HZ;
+
+		timeout = wait_for_completion_timeout(&dev->reconf, initial_to);
+	}
 	if (atomic_read(&dev->ssr_in_progress))
 		return -ENODEV;
 
@@ -1661,11 +2035,14 @@ capability_retry:
 				 * Re-send PM_ACTIVE to kick ADSP SLIMbus
 				 * manager, then retry without DMA teardown
 				 * (matching downstream capability_retry).
+				 * Sleep 500 ms — measured ADSP recovery time
+				 * after Excep crash is ~340 ms; 500 ms gives
+				 * margin without dragging out total timeout.
 				 */
 				dev_info(dev->dev,
 					 "NGD_CFG cleared by ADSP, re-sending PM_ACTIVE\n");
 				msm8953_slim_qmi_power_request(dev, true);
-				msleep(50);
+				msleep(500);
 			}
 			goto capability_retry;
 		}
@@ -1902,6 +2279,27 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 	}
 #endif
 
+	/*
+	 * Path selection (evidence-based):
+	 *
+	 * - MT_CORE messages addressed to the codec (CHANGE_VALUE,
+	 *   REQUEST_VALUE, REPORT_INFORMATION) must go via AHB. BAM TX
+	 *   pipe 4 is qcom,controlled-remotely and lands in the ADSP,
+	 *   whose dispatcher (adsp_sat_dispatcher @ 0xf04ca424) silently
+	 *   drops MT=0 frames with MC != 0x29 — so codec PGD/IFC writes
+	 *   never reach the codec via BAM TX. See codec_pgd_via_ahb_finding.md.
+	 *
+	 * - USR messages (DEST_REFERRED_USER, SRC_REFERRED_USER) are
+	 *   meant for the ADSP itself — stay on BAM TX.
+	 *
+	 * AHB writes need TX_MSGQ_EN cleared in NGD_CFG: when TX_MSGQ_EN
+	 * is set, the NGD hardware steers all TX through the BAM TX queue
+	 * and ignores writes to NGD_TX_MSG. We can't clear it globally
+	 * (ADSP appears to gate its QMI handshake on TX_MSGQ_EN being set
+	 * at power-on — clearing it globally hangs early boot). So we
+	 * toggle it per AHB write. xfer_msg is serialized by the SLIMbus
+	 * controller mutex, so no race with USR BAM writes.
+	 */
 	if (dev->use_bam_tx) {
 		ret = msm8953_slim_bam_tx(dev, pbuf, txn->rl);
 	} else {
@@ -2726,6 +3124,8 @@ static int msm8953_slim_probe(struct platform_device *pdev)
 	dev->ctrl.get_laddr      = msm8953_slim_get_laddr;
 	dev->ctrl.xfer_msg       = msm8953_slim_xfer_msg;
 	dev->ctrl.enable_stream  = msm8953_slim_enable_stream;
+	dev->ctrl.alloc_port     = msm8953_slim_alloc_port;
+	dev->ctrl.dealloc_port   = msm8953_slim_dealloc_port;
 	dev->ctrl.dev          = &pdev->dev;
 	dev->ctrl.a_framer     = &dev->framer;
 
@@ -2889,6 +3289,46 @@ static void msm8953_slim_remove(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
 }
 
+/*
+ * Shutdown handler: called on system reboot/poweroff. Without this,
+ * Linux skips teardown and the ADSP keeps the satellite + slot table
+ * state from the previous session, which is what was causing the
+ * intermittent "Excep:0:Exception detected" + MCAP timeout + QMI
+ * service not found cycle on the FIRST boot after a hot reboot.
+ *
+ * Per `feedback_no_bold_claims.md`: this may or may not fully fix the
+ * flakiness. Stating what it does: tells the ADSP we're going inactive
+ * (PM_INACTIVE QMI), cancels pending work, releases BAM data pipes,
+ * disables NGD_CFG so the HW is quiesced. The next cold boot then
+ * starts from a clean ADSP-side state.
+ */
+static void msm8953_slim_shutdown(struct platform_device *pdev)
+{
+	struct msm8953_slim_ctrl *dev = platform_get_drvdata(pdev);
+	void __iomem *ngd;
+
+	if (!dev)
+		return;
+
+	/*
+	 * MINIMAL shutdown: just quiesce the NGD HW register so the
+	 * controller stops driving the bus while the SoC resets.
+	 *
+	 * Do NOT call msm8953_slim_qmi_power_request (it does qmi_txn_wait
+	 * which blocks up to ~5s on a dead/uninitialized QMI socket).
+	 * Do NOT call dma_release_channel (BAM tear-down can block on HW
+	 * state if BAM was active; observed to hang reboot 2026-05-26).
+	 * Do NOT cancel work — the kernel core does that when device is
+	 * removed in the shutdown path.
+	 *
+	 * Only clear NGD_CFG. That's the one thing the ADSP-side firmware
+	 * watches to know whether the AP-side controller is alive.
+	 */
+	ngd = ngd_base(dev);
+	writel_relaxed(0, ngd + NGD_CFG);
+	mb();
+}
+
 /* ---- PM ops -------------------------------------------------------------- */
 
 static const struct dev_pm_ops msm8953_slim_pm_ops = {
@@ -2906,8 +3346,9 @@ static const struct of_device_id msm8953_slim_dt_match[] = {
 MODULE_DEVICE_TABLE(of, msm8953_slim_dt_match);
 
 static struct platform_driver msm8953_slim_driver = {
-	.probe  = msm8953_slim_probe,
-	.remove = msm8953_slim_remove,
+	.probe    = msm8953_slim_probe,
+	.remove   = msm8953_slim_remove,
+	.shutdown = msm8953_slim_shutdown,
 	.driver = {
 		.name           = "qcom-slim-ngd-msm8953",
 		.pm             = &msm8953_slim_pm_ops,
