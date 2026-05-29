@@ -2332,7 +2332,16 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 			u8 slim_port = txn->msg->wbuf[0];
 
 			wbuf[i++] = txn->la;   /* codec device LA (200) */
-			la = SLIM_LA_MGR;      /* destination = manager */
+			/*
+			 * Destination = manager. NOTE (2026-05-29): the lineage
+			 * ngdtap shows CONNECT with la=0xc8, but that is the txn
+			 * at ngd_xfer_msg ENTRY — downstream rewrites la=SLIM_LA_MGR
+			 * for the wire (slim-msm-ngd.c:587) with wbuf=[codec_la,
+			 * port,chan,tid]. So the WIRE CONNECT goes to MGR on BOTH
+			 * devices; they match. (Directing to 0xc8 → CONNECT ACK
+			 * timeout, verified.)
+			 */
+			la = SLIM_LA_MGR;      /* destination = manager (matches wire) */
 			wbuf[i++] = slim_port; /* codec port number */
 
 			dev_info(dev->dev,
