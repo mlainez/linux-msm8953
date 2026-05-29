@@ -2351,23 +2351,15 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 			 * and DEC captures silence regardless of SLIM.
 			 */
 			{
-				static const u16 mpr[] = {0x602,
-					0x0a31, 0x0a41, 0x0a51, 0x0a61, 0x0a71,
-					0x0a81, 0x0a91, 0x0aa1, 0x0ab1,
-					0x0d41, 0x0d42, 0x0d6e};
-				char b[200];
-				int ri, bp = 0;
-				unsigned int rv;
-
-				for (ri = 0; ri < ARRAY_SIZE(mpr); ri++) {
-					rv = 0;
-					regmap_read(wcd->regmap, mpr[ri], &rv);
-					bp += scnprintf(b + bp, sizeof(b) - bp,
-						"%03x=%02x ", mpr[ri], rv & 0xff);
-				}
-				dev_info(wcd->dev,
-					"mic-path regs: %s| lineage-cap: 011=03 263=05 601=80 602=84 605=b4 622=50 64a=6e aa1=24 d41=01 d42=0d d6e=40\n",
-					b);
+				/* CFG0 (CTL+1) bit7 = DMIC(1)/AMIC(0) select per dec;
+				 * CTL (a_1) bit5 = active. ADC_MUXn_CFG1 (0x394+n) =
+				 * the ADC-mux input select. Lineage WORKING active dec
+				 * (DEC7): aa1=0x24 (active) aa2=0x90 (bit7=DMIC). */
+				unsigned int rdmp_a, rdmp_v;
+				for (rdmp_a = 0; rdmp_a <= 0x0dff; rdmp_a++)
+					if (regmap_read(wcd->regmap, rdmp_a, &rdmp_v) == 0)
+						dev_info(wcd->dev, "RDMP %03x:%02x\n", rdmp_a, rdmp_v & 0xff);
+				dev_info(wcd->dev, "RDMP done\n");
 			}
 		}
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {

@@ -1,58 +1,41 @@
 // SPDX-License-Identifier: GPL-2.0
-/* adspmem - reconstruct the ADSP firmware log from the reclaimed reserved
- * region (read AFTER `echo stop > remoteproc2/state`; reading while running
- * reboots the AP). The QDSP6 log ring stores records [fmt_ptr][args...] where
- * fmt_ptr is a runtime addr into the code+rodata segment. We resolve every
- * word that points to a printable rodata string and print it — that IS the
- * ADSP's runtime log. Addr map: dump_off(V)=seg.paddr+(V-seg.vaddr)-0x8a200000.
- */
+/* adspmem - read the ADSP firmware log ring (post `echo stop`) and DECODE the
+ * args of key records to see the actual scheduled-bandwidth / channel params.
+ * QDSP6 log record = [fmt_ptr][arg0][arg1]...; fmt_ptr is a runtime addr into
+ * adsp.b04 (vaddr 0xf015f000, dump off 0x5f000), so for a string found at dump
+ * offset O in that segment, its runtime addr V = 0xf0100000 + O. We find each
+ * target format string, compute V, scan the region for records word[0]==V and
+ * print the following arg words. */
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/io.h>
-#include <linux/ctype.h>
 
-#define ADSP_PA   0x8d600000UL
-#define ADSP_SZ   0x01100000UL
-#define G_CTRL_TABLE 0xf0c854d0u
+#define ADSP_PA 0x8d600000UL
+#define ADSP_SZ 0x01100000UL
+#define B04_OFF_LO 0x5f000UL		/* adsp.b04 rodata window in dump */
+#define B04_OFF_HI 0x6fc000UL
+#define V_OF(O)   (0xf0100000u + (u32)(O))	/* dump off -> runtime addr (b04) */
 
-/* rodata/code segment that holds log format strings */
-#define ROD_LO 0xf015f000u
-#define ROD_HI 0xf07fc000u
-
-struct seg { u32 vaddr, paddr, memsz; };
-static const struct seg segs[] = {
-	{ 0xf0100000, 0x8a200000, 0x02000 }, { 0xf0102000, 0x8a202000, 0x5d000 },
-	{ 0xf015f000, 0x8a25f000, 0x69d000 }, { 0xf07fc000, 0x8a8fc000, 0x4b1000 },
-	{ 0xf0cad000, 0x8adad000, 0x01000 }, { 0xf0cae000, 0x8adae000, 0x68000 },
-	{ 0xf0000000, 0x8ae16000, 0x14000 }, { 0xf0014000, 0x8ae2a000, 0x08000 },
+struct tgt { const char *s; int nargs; };
+/* records point to the string START incl the "[INFO] " level prefix, so match
+ * the full prefixed string */
+static const struct tgt tgts[] = {
+	{ "[INFO] Bandwidth utilization stats on primary line", 4 },
+	{ "[INFO] Active channel parameters", 5 },
+	{ "[INFO] Channel %d was assigned data line %d", 3 },
+	{ "[INFO] Got satellite define channel request", 6 },
+	{ "[INFO] Processing reconfiguration sequence", 1 },
 };
-static long v2off(u32 v)
+
+/* find first dump offset of needle within the b04 rodata window */
+static long find_str(const u8 *p, const char *needle)
 {
-	int i;
-	for (i = 0; i < ARRAY_SIZE(segs); i++)
-		if (v >= segs[i].vaddr && v < segs[i].vaddr + segs[i].memsz)
-			return (long)segs[i].paddr + (long)(v - segs[i].vaddr) - 0x8a200000L;
+	size_t nl = strlen(needle), i;
+
+	for (i = B04_OFF_LO; i + nl <= B04_OFF_HI; i++)
+		if (p[i] == needle[0] && !memcmp(p + i, needle, nl))
+			return (long)i;
 	return -1;
-}
-
-/* resolve a runtime rodata ptr to its string; return len of printable run */
-static int resolve_str(const u8 *base, u32 v, char *out, int max)
-{
-	long off = v2off(v);
-	int i = 0;
-
-	if (off < 0 || off >= (long)ADSP_SZ)
-		return 0;
-	while (i < max - 1 && off + i < (long)ADSP_SZ) {
-		char c = base[off + i];
-		if (c == 0)
-			break;
-		if (!isprint((unsigned char)c))
-			return 0;	/* not a clean string -> probably not a fmt ptr */
-		out[i++] = c;
-	}
-	out[i] = 0;
-	return i;
 }
 
 static int __init adspmem_init(void)
@@ -60,45 +43,42 @@ static int __init adspmem_init(void)
 	const u8 *p;
 	const u32 *w;
 	size_t nw, i;
-	char s[128];
-	int printed = 0;
-	bool junk;
-	u32 t;
+	int t;
 
 	p = memremap(ADSP_PA, ADSP_SZ, MEMREMAP_WB);
 	if (!p) { pr_err("adspmem: memremap failed\n"); return -ENOMEM; }
-	pr_info("adspmem: mapped; reconstructing ADSP log ring\n");
+	pr_info("adspmem: decoding log-record args\n");
+	w = (const u32 *)p;
+	nw = ADSP_SZ / 4;
 
-	/* controller table entries 0..4 (find the non-NULL audio ctrl) */
-	for (i = 0; i < 5; i++) {
-		long o = v2off(G_CTRL_TABLE + i * 4);
-		t = (o >= 0) ? *(const u32 *)(p + o) : 0;
-		pr_info("adspmem: g_slim_ctrl_table[%zu]=0x%08x\n", i, t);
-	}
+	for (t = 0; t < ARRAY_SIZE(tgts); t++) {
+		long off = find_str(p, tgts[t].s);
+		u32 v;
+		int hits = 0;
 
-	/* Walk the log-ring region (fmt ptrs clustered ~0x9b5000); resolve every
-	 * rodata-pointing word to its string -> the runtime log, in memory order.
-	 * Scan a generous window around the observed cluster. */
-	w = (const u32 *)(p + 0x9b0000);
-	nw = 0x10000 / 4;	/* 64 KB window */
-	for (i = 0; i < nw && printed < 400; i++) {
-		u32 v = w[i];
-
-		if (v >= ROD_LO && v < ROD_HI) {
-			int l = resolve_str(p, v, s, sizeof(s));
-			/* log fmt strings start with '[' (level) or a filename */
-			if (l >= 8 && (s[0] == '[' || strchr(s, ':'))) {
-				pr_info("adspmem|%05lx| %s\n",
-					(unsigned long)(0x9b0000 + i * 4), s);
-				printed++;
+		if (off < 0) {
+			pr_info("adspmem: fmt not found: \"%s\"\n", tgts[t].s);
+			continue;
+		}
+		v = V_OF(off);
+		pr_info("adspmem: \"%s\" fmt@0x%08x (off 0x%lx)\n",
+			tgts[t].s, v, (unsigned long)off);
+		for (i = 0; i + 6 < nw && hits < 8; i++) {
+			if (w[i] == v) {
+				/* a log record: word[0]=fmt, word[1..]=args */
+				pr_info("adspmem:   rec@0x%lx args: %u %u %u %u %u %u\n",
+					(unsigned long)(i * 4),
+					w[i+1], w[i+2], w[i+3],
+					w[i+4], w[i+5], w[i+6]);
+				hits++;
 			}
 		}
+		if (!hits)
+			pr_info("adspmem:   (no log records reference this fmt)\n");
 	}
-	pr_info("adspmem: done (%d log lines)\n", printed);
-	(void)junk;
 	memunmap(p);
 	return -EAGAIN;
 }
 module_init(adspmem_init);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("ADSP firmware log-ring reconstructor");
+MODULE_DESCRIPTION("ADSP log-record arg decoder");
