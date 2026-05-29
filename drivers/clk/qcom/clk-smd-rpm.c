@@ -509,6 +509,16 @@ DEFINE_CLK_SMD_RPM_XO_BUFFER(div_clk1, 11, 19200000);
  * div_clk2: WCD9335 MCLK. Defined as rate-settable (not XO buffer) so
  * clk_set_rate(9600000) sends RPM key=RATE to configure the divider.
  * WCD9335 requires 9.6MHz MCLK — 19.2MHz (XO direct) doesn't work.
+ *
+ * 2026-05-29: tried XO_BUFFER (SOFTWARE_ENABLE) instead — did NOT fix
+ * the silent-capture / efuse-fail and made divclk2 (gpio-gate) show
+ * hardware-disabled (clk_set_rate has no-op on a branch parent). The
+ * real blocker is NOT MCLK delivery: during active capture ANA_CLK_TOP
+ * reads 0x84 (codec DID lock external MCLK), while CDC dig-core power
+ * RPM_PWR_CDC_DIG_HM_CTL(0x011) is stuck 0x07 (lineage 0x03), gating
+ * the page-0x0d CDC clock regs. Kept rate-settable; pursue the dig-core
+ * power-collapse-remove sequence instead. See
+ * codec_mclk_not_reaching_digital_core.md.
  */
 __DEFINE_CLK_SMD_RPM(div_clk2, div_clk2_a, QCOM_SMD_RPM_CLK_BUF_A, 12,
 		     QCOM_RPM_SMD_KEY_RATE, 19200000, 0);

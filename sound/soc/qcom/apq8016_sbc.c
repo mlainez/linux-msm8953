@@ -10,6 +10,9 @@
 #include <linux/of.h>
 #include <linux/clk.h>
 #include <linux/platform_device.h>
+#include <linux/workqueue.h>
+#include <linux/notifier.h>
+#include <linux/remoteproc/qcom_rproc.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/jack.h>
@@ -32,6 +35,20 @@ struct apq8016_sbc_data {
 	bool jack_setup;
 	bool use_ibit_clk;
 	int mi2s_clk_count[MI2S_COUNT];
+
+	/*
+	 * ADSP ("lpass") SSR recovery for q6/qdsp6-backed cards. On an ADSP
+	 * subsystem restart the q6 DAI components disappear and reappear; the
+	 * ASoC core's partial component-driven rebind then fails -EBUSY, so
+	 * we fully unregister the card on ADSP-down and re-register it on
+	 * ADSP-up (with retry, since the q6 APR components come back slightly
+	 * after AFTER_POWERUP).
+	 */
+	struct notifier_block ssr_nb;
+	void *ssr_notifier;
+	struct delayed_work card_register_work;
+	bool card_registered;
+	int register_retries;
 };
 
 #define MIC_CTRL_TER_WS_SLAVE_SEL BIT(21)
@@ -422,6 +439,80 @@ static const struct snd_soc_dapm_widget apq8016_sbc_dapm_widgets[] = {
 	SND_SOC_DAPM_MIC("Digital Mic2", NULL),
 };
 
+/*
+ * Register the sound card, retrying while the q6 DAI components are not yet
+ * available (ADSP just powered up / SSR recovery in progress). Used for the
+ * initial bring-up and after every ADSP SSR.
+ */
+static void apq8016_sbc_register_work(struct work_struct *w)
+{
+	struct apq8016_sbc_data *data =
+		container_of(w, struct apq8016_sbc_data, card_register_work.work);
+	struct snd_soc_card *card = &data->card;
+	int ret;
+
+	if (data->card_registered)
+		return;
+
+	ret = snd_soc_register_card(card);
+	if (ret == -EPROBE_DEFER) {
+		/* q6 DAI components not re-registered yet — retry (~6s max) */
+		if (++data->register_retries <= 30) {
+			schedule_delayed_work(&data->card_register_work,
+					      msecs_to_jiffies(200));
+			return;
+		}
+		dev_err(card->dev,
+			"sound card re-register timed out waiting for components\n");
+		return;
+	}
+	if (ret) {
+		/*
+		 * -EBUSY here is the known ASoC-core SSR-rebind limitation:
+		 * the prior card's PCM devices are not fully released when the
+		 * q6 (APR) components vanish, so snd_pcm_add() collides
+		 * (sound/core/pcm.c snd_pcm_add → -EBUSY). Don't spin on it.
+		 */
+		dev_err(card->dev,
+			"sound card re-register failed: %d (ADSP SSR card recovery still needs an ASoC-core fix)\n",
+			ret);
+		return;
+	}
+
+	data->register_retries = 0;
+	data->card_registered = true;
+	dev_info(card->dev, "sound card registered\n");
+}
+
+static int apq8016_sbc_ssr_notify(struct notifier_block *nb,
+				  unsigned long action, void *unused)
+{
+	struct apq8016_sbc_data *data =
+		container_of(nb, struct apq8016_sbc_data, ssr_nb);
+	struct snd_soc_card *card = &data->card;
+
+	switch (action) {
+	case QCOM_SSR_BEFORE_SHUTDOWN:
+		/* ADSP going down: fully tear the card down so the rebuild is
+		 * clean (avoids the partial-rebind -EBUSY). */
+		cancel_delayed_work_sync(&data->card_register_work);
+		if (data->card_registered) {
+			snd_soc_unregister_card(card);
+			data->card_registered = false;
+			dev_info(card->dev, "ADSP SSR: sound card unregistered\n");
+		}
+		break;
+	case QCOM_SSR_AFTER_POWERUP:
+		/* ADSP back up: rebuild the card once q6 components reappear. */
+		data->register_retries = 0;
+		schedule_delayed_work(&data->card_register_work,
+				      msecs_to_jiffies(100));
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
 static int apq8016_sbc_platform_probe(struct platform_device *pdev)
 {
 	void (*add_ops)(struct snd_soc_card *card);
@@ -468,7 +559,63 @@ static int apq8016_sbc_platform_probe(struct platform_device *pdev)
 	snd_soc_card_set_drvdata(card, data);
 
 	add_ops(card);
-	return devm_snd_soc_register_card(&pdev->dev, card);
+
+	/*
+	 * Plain (MI2S-direct) apq8016-sbc cards do not depend on the ADSP, so
+	 * keep the simple devm registration for them.
+	 */
+	if (add_ops == apq8016_sbc_add_ops)
+		return devm_snd_soc_register_card(&pdev->dev, card);
+
+	/*
+	 * q6/qdsp6-backed cards depend on the ADSP. Arm an ADSP ("lpass") SSR
+	 * notifier and manage the card registration ourselves so the sound
+	 * card survives an ADSP subsystem restart without an AP reboot.
+	 */
+	INIT_DELAYED_WORK(&data->card_register_work, apq8016_sbc_register_work);
+
+	data->ssr_nb.notifier_call = apq8016_sbc_ssr_notify;
+	data->ssr_notifier = qcom_register_ssr_notifier("lpass", &data->ssr_nb);
+	if (IS_ERR(data->ssr_notifier)) {
+		ret = PTR_ERR(data->ssr_notifier);
+		data->ssr_notifier = NULL;
+		return ret;
+	}
+
+	ret = snd_soc_register_card(card);
+	if (ret == -EPROBE_DEFER) {
+		/* components not ready yet — let the retry work bring it up */
+		schedule_delayed_work(&data->card_register_work,
+				      msecs_to_jiffies(100));
+		return 0;
+	}
+	if (ret) {
+		qcom_unregister_ssr_notifier(data->ssr_notifier, &data->ssr_nb);
+		return ret;
+	}
+
+	data->card_registered = true;
+	return 0;
+}
+
+static void apq8016_sbc_platform_remove(struct platform_device *pdev)
+{
+	struct snd_soc_card *card = platform_get_drvdata(pdev);
+	struct apq8016_sbc_data *data;
+
+	if (!card)
+		return;
+	data = snd_soc_card_get_drvdata(card);
+
+	/* Only the q6/qdsp6 path arms these; the devm path is self-cleaning. */
+	if (data->ssr_notifier) {
+		qcom_unregister_ssr_notifier(data->ssr_notifier, &data->ssr_nb);
+		cancel_delayed_work_sync(&data->card_register_work);
+	}
+	if (data->card_registered) {
+		snd_soc_unregister_card(card);
+		data->card_registered = false;
+	}
 }
 
 static const struct of_device_id apq8016_sbc_device_id[] __maybe_unused = {
@@ -488,6 +635,7 @@ static struct platform_driver apq8016_sbc_platform_driver = {
 		.of_match_table = of_match_ptr(apq8016_sbc_device_id),
 	},
 	.probe = apq8016_sbc_platform_probe,
+	.remove = apq8016_sbc_platform_remove,
 };
 module_platform_driver(apq8016_sbc_platform_driver);
 

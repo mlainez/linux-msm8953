@@ -1386,6 +1386,50 @@ static int msm8953_slim_xfer_msg_sync(struct slim_controller *ctrl,
 	return 0;
 }
 
+/*
+ * Experiment knob (2026-05-29): mainline unconditionally prepends a
+ * REQ_BW(0x28)+RECONFIG_NOW(0x24) before DEF_ACT_CHAN. Downstream
+ * ngd_allocbw only sends that pair when messaging bandwidth actually
+ * changed (ctrl->sched.msgsl != pending_msgsl); for a steady data-channel
+ * activation it sends ONLY DEF_ACT_CHAN + RECONFIG_NOW. The extra leading
+ * reconfig may leave the ADSP reconfig state machine such that the real
+ * (post-DEF_ACT) reconfig schedules no slot — codec PORT_CFG bit3 never
+ * sets, capture all-zero. Set skip_lead_reqbw=1 to match downstream and
+ * test whether the codec TX slot then gets scheduled.
+ */
+static bool slim_skip_lead_reqbw;
+module_param(slim_skip_lead_reqbw, bool, 0644);
+MODULE_PARM_DESC(slim_skip_lead_reqbw,
+	"Skip the leading REQ_BW+RECONFIG_NOW before DEF_ACT_CHAN (match downstream)");
+
+/*
+ * Messaging-channel slots requested in the leading REQ_BW. The downstream
+ * codec (tasha_codec_vote_max_bw -> slim_reservemsg_bw(SLIM_BW_CLK_GEAR_9))
+ * reserves a LARGE messaging bandwidth to force the SLIMbus clock gear up so
+ * the ADSP framer's superframe has room to schedule the data slot. Captured
+ * on the working lineage device the bring-up REQ_BW carries pending_msgsl=388
+ * ([88 30 ..]); mainline previously hard-coded 8 ([08 01 ..]) which keeps the
+ * gear too low -> ADSP never schedules the codec TX slot (PORT_CFG bit3=0).
+ */
+static int reqbw_msgsl = 388;
+module_param(reqbw_msgsl, int, 0644);
+MODULE_PARM_DESC(reqbw_msgsl,
+	"pending_msgsl reserved in leading REQ_BW (default 388 = downstream CLK_GEAR_9)");
+
+/* DEF_ACT_CHAN byte3 FL (Frequency-Locked) bit. Live lineage capture shows
+ * downstream sets it (byte3=0x83=prrate|0x80); a prior session wrongly removed
+ * it. Default on = match the working device. */
+static bool def_act_fl = true;
+module_param(def_act_fl, bool, 0644);
+MODULE_PARM_DESC(def_act_fl, "Set FL bit (0x80) in DEF_ACT_CHAN byte3 (match lineage)");
+
+/* Vote messaging BW back DOWN (REQ_BW msgsl=0)+RECONFIG before DEF_ACT_CHAN.
+ * Lineage votes up(388) then down(0) before defining the data channel so the
+ * superframe is free for the data slot; mainline was holding 388. */
+static bool reqbw_unvote = true;
+module_param(reqbw_unvote, bool, 0644);
+MODULE_PARM_DESC(reqbw_unvote, "Send REQ_BW msgsl=0 + RECONFIG before DEF_ACT_CHAN (match lineage)");
+
 static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 {
 	struct slim_device *sdev = rt->dev;
@@ -1451,12 +1495,19 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 			/* Byte 2: rootexp + protocol */
 			wbuf[txn.msg->num_bytes++] = exp << 4 | rt->prot;
 
-			/* Byte 3: standard SLIMbus prrate + FL for ISO */
-			if (rt->prot == SLIM_PROTO_ISO)
-				wbuf[txn.msg->num_bytes++] =
-					port->ch.prrate | SLIM_CHANNEL_CONTENT_FL;
-			else
-				wbuf[txn.msg->num_bytes++] = port->ch.prrate;
+			/*
+			 * Byte 3: prrate | FL (Frequency-Locked) bit.
+			 *
+			 * 2026-05-29: a LIVE wire-tap of a WORKING lineage mic
+			 * capture (ngdtap hook on ngd_xfer_msg) shows downstream
+			 * DEF_ACT_CHAN byte3 = 0x83 = prrate(0x03) | 0x80, i.e.
+			 * the FL bit IS set. A prior session had removed it
+			 * citing a source reading ("bare prrate") — that was
+			 * wrong; the working device sets FL. Restore it.
+			 * def_act_fl param allows A/B testing.
+			 */
+			wbuf[txn.msg->num_bytes++] = port->ch.prrate |
+						     (def_act_fl ? 0x80 : 0x00);
 
 			ret = slim_alloc_txn_tid(ctrl, &txn);
 			if (ret) {
@@ -1480,6 +1531,21 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 	 * activates the channel in the ADSP's internal state machine.
 	 */
 
+#if 0 /* DISABLED 2026-05-28: grounded analysis — downstream sends only
+       * codec CONNECT_SRC for q6 DSP captures (techpack/audio/asoc/codecs/
+       * wcd9xxx-slimslave.c:410 calls slim_connect_src(codec_port)); the
+       * AP-mgrport CONNECT_SINK + BAM-arm (techpack/audio/asoc/
+       * msm-dai-slim.c:151 via slim_alloc_mgrports/slim_connect_sink) is
+       * used ONLY for AP-direct SLIM paths (BT/FM, msm-dai-slim DAIs),
+       * NOT for MM*→SLIMBUS_0_TX→codec. The "master_port_connect_missing"
+       * hypothesis we relied on was therefore wrong for this path.
+       * Empirically with this block ENABLED: codec config matches lineage
+       * byte-for-byte, no codec TX overflow, q6asm READ_DONE status=0 with
+       * cycling buffers, but data is all zero — consistent with the
+       * spurious AP-side sink letting the SLIM framer route the codec's
+       * data to the (unread) AP BAM pipe instead of leaving the ADSP AFE
+       * RX as the sole sink for ch129.
+       */
 	/*
 	 * AP-side master-port allocation (2026-05-26).
 	 *
@@ -1626,6 +1692,7 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 				 mret, port_b, port->ch.id);
 		}
 	}
+#endif /* DISABLED master CONNECT_SINK injection */
 
 	/*
 	 * Send REQ_BW (mc=0x28) to request bandwidth allocation from the
@@ -1633,7 +1700,7 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 	 * DEF_ACT_CHAN but never allocates bus frame slots for them,
 	 * leaving data stuck in PGD port FIFOs (overflow state).
 	 */
-	{
+	if (!slim_skip_lead_reqbw) {
 		u8 bbuf[4];
 		struct slim_val_inf bmsg = {0, 3, NULL, bbuf, NULL};
 		struct slim_msg_txn btxn = {0};
@@ -1654,8 +1721,8 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 		 * pending_msgsl is the number of messaging slots needed.
 		 * For simple audio playback, request minimum slots (8).
 		 */
-		bbuf[0] = (sdev->laddr & 0x1f) | ((8 & 0x7) << 5);
-		bbuf[1] = (8 >> 3);
+		bbuf[0] = (sdev->laddr & 0x1f) | ((reqbw_msgsl & 0x7) << 5);
+		bbuf[1] = (reqbw_msgsl >> 3);
 
 		ret = slim_alloc_txn_tid(ctrl, &btxn);
 		if (ret)
@@ -1683,7 +1750,7 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 	 * Matches downstream ngd_allocbw sequence:
 	 *   REQ_BW -> RECONFIG_NOW -> DEF_ACT_CHAN -> RECONFIG_NOW.
 	 */
-	{
+	if (!slim_skip_lead_reqbw) {
 		u8 rbw_buf[2];
 		struct slim_val_inf rbw_msg = {0, 2, NULL, rbw_buf, NULL};
 		struct slim_msg_txn rbw_txn = {0};
@@ -1712,6 +1779,68 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 			slim_free_txn_tid(ctrl, &rbw_txn);
 			dev_warn(&sdev->dev,
 				 "REQ_BW RECONFIG_NOW failed: %d\n", ret);
+		}
+	}
+
+	/*
+	 * Vote-DOWN (REQ_BW msgsl=0) + RECONFIG_NOW before DEF_ACT_CHAN.
+	 *
+	 * 2026-05-29: the live lineage capture votes messaging BW UP (388) then
+	 * back DOWN (0), each committed with RECONFIG_NOW, BEFORE defining the
+	 * data channel — so when DEF_ACT_CHAN runs the messaging reservation is
+	 * 0, leaving the whole superframe for the data slot. Mainline was
+	 * HOLDING msgsl=388 through DEF_ACT, which can starve the data channel
+	 * of superframe slots so the framer never schedules the codec TX slot.
+	 * Send the unvote to match.
+	 */
+	if (!slim_skip_lead_reqbw && reqbw_unvote) {
+		u8 ubuf[4];
+		struct slim_val_inf umsg = {0, 3, NULL, ubuf, NULL};
+		struct slim_msg_txn utxn = {0};
+		DECLARE_COMPLETION_ONSTACK(udone);
+		u8 rbuf2[2];
+		struct slim_val_inf rmsg2 = {0, 2, NULL, rbuf2, NULL};
+		struct slim_msg_txn rtxn2 = {0};
+		DECLARE_COMPLETION_ONSTACK(rdone2);
+
+		/* REQ_BW msgsl=0 */
+		utxn.mt = SLIM_MSG_MT_DEST_REFERRED_USER;
+		utxn.dt = SLIM_MSG_DEST_LOGICALADDR;
+		utxn.la = SLIM_LA_MGR;
+		utxn.mc = SLIM_USR_MC_REQ_BW;
+		utxn.msg = &umsg;
+		ubuf[0] = (sdev->laddr & 0x1f);	/* msgsl=0 */
+		ubuf[1] = 0;
+		ret = slim_alloc_txn_tid(ctrl, &utxn);
+		if (!ret) {
+			ubuf[2] = utxn.tid;
+			umsg.num_bytes = 3;
+			utxn.rl = umsg.num_bytes + 4;
+			utxn.comp = &udone;
+			dev_info(ctrl->dev, "REQ_BW unvote: [%02x %02x tid=%d]\n",
+				 ubuf[0], ubuf[1], utxn.tid);
+			ret = msm8953_slim_xfer_msg_sync(ctrl, &utxn);
+			if (ret)
+				slim_free_txn_tid(ctrl, &utxn);
+		}
+
+		/* RECONFIG_NOW to commit the unvote */
+		rtxn2.mt = SLIM_MSG_MT_DEST_REFERRED_USER;
+		rtxn2.dt = SLIM_MSG_DEST_LOGICALADDR;
+		rtxn2.la = SLIM_LA_MGR;
+		rtxn2.mc = SLIM_USR_MC_RECONFIG_NOW;
+		rtxn2.msg = &rmsg2;
+		rbuf2[1] = sdev->laddr;
+		ret = slim_alloc_txn_tid(ctrl, &rtxn2);
+		if (!ret) {
+			rbuf2[0] = rtxn2.tid;
+			rtxn2.rl = rmsg2.num_bytes + 4;
+			rtxn2.comp = &rdone2;
+			dev_info(ctrl->dev, "REQ_BW unvote RECONFIG_NOW: tid=%d\n",
+				 rtxn2.tid);
+			ret = msm8953_slim_xfer_msg_sync(ctrl, &rtxn2);
+			if (ret)
+				slim_free_txn_tid(ctrl, &rtxn2);
 		}
 	}
 
@@ -1752,6 +1881,12 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 		return ret;
 	}
 
+#if 0 /* DISABLED 2026-05-28: pairs with the disabled AP-side master
+       * CONNECT_SINK above — without that CONNECT the AP isn't a SLIM
+       * sink for the channel, so arming an AP-side BAM pipe makes no
+       * sense for q6 DSP captures. For q6 the AP receives PCM via
+       * q6asm shared memory (APR), not via its own SLIMbus BAM.
+       */
 	/*
 	 * After RECONFIG_NOW: the ADSP has accepted the channel set and
 	 * has now assigned a BAM pipe to each AP-side data port (port_b).
@@ -1810,6 +1945,7 @@ static int msm8953_slim_enable_stream(struct slim_stream_runtime *rt)
 			data_idx++;
 		}
 	}
+#endif /* DISABLED BAM-arm */
 
 	/*
 	 * Do NOT send CORE BEGIN_RECONFIG / DEFINE_CONTENT / ACTIVATE /

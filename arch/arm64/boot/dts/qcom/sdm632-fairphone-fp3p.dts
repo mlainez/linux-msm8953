@@ -68,6 +68,29 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&tasha_mclk_default>;
 	};
+
+	/*
+	 * External LDO that feeds the WCD9335 SIDO buck input plus
+	 * vdd-tx-h / vdd-rx-h / vdd-px (1.8V at up to 650 mA combined).
+	 * Enabled by TLMM gpio50 active-high. Matches downstream
+	 * msm8953-regulator.dtsi (eldo2_8953). Without this, the codec
+	 * gets vdd-buck from pm8953_l5 (5 mA budget) and the SIDO never
+	 * starts, so the analog block (page 0x06) stays unpowered and
+	 * page-0x06 / page-0x0a / page-0x0d writes silently fail to
+	 * latch, with reads returning 0.
+	 */
+	eldo2_8953: regulator-eldo2-8953 {
+		compatible = "regulator-fixed";
+		regulator-name = "eldo2_8953";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 50 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+		regulator-boot-on;
+		pinctrl-names = "default";
+		pinctrl-0 = <&codec_eldo2_en>;
+	};
 };
 
 &gpu {
@@ -184,10 +207,10 @@
 
 			#sound-dai-cells = <1>;
 
-			vdd-buck-supply = <&pm8953_l5>;
-			vdd-buck-sido-supply = <&pm8953_l5>;
-			vdd-rx-supply = <&pm8953_l5>;
-			vdd-tx-supply = <&pm8953_l5>;
+			vdd-buck-supply = <&eldo2_8953>;
+			vdd-buck-sido-supply = <&eldo2_8953>;
+			vdd-rx-supply = <&eldo2_8953>;
+			vdd-tx-supply = <&eldo2_8953>;
 			vdd-io-supply = <&pm8953_l5>;
 			vdd-vbat-supply = <&vph_pwr>;
 			vdd-micbias-supply = <&pm8953_l13>;
@@ -588,6 +611,14 @@
 		function = "gpio";
 		drive-strength = <2>;
 		bias-pull-down;
+	};
+
+	codec_eldo2_en: codec-eldo2-en-state {
+		pins = "gpio50";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-high;
 	};
 };
 
