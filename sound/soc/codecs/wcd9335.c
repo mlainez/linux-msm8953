@@ -2355,11 +2355,20 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 				 * CTL (a_1) bit5 = active. ADC_MUXn_CFG1 (0x394+n) =
 				 * the ADC-mux input select. Lineage WORKING active dec
 				 * (DEC7): aa1=0x24 (active) aa2=0x90 (bit7=DMIC). */
-				unsigned int rdmp_a, rdmp_v;
-				for (rdmp_a = 0; rdmp_a <= 0x0dff; rdmp_a++)
-					if (regmap_read(wcd->regmap, rdmp_a, &rdmp_v) == 0)
-						dev_info(wcd->dev, "RDMP %03x:%02x\n", rdmp_a, rdmp_v & 0xff);
-				dev_info(wcd->dev, "RDMP done\n");
+				struct wcd9335_slim_ch *ch2; u8 cfg, st; int k, s3, s0;
+				list_for_each_entry(ch2, &dai_data->slim_ch_list, list) {
+					s3 = 0; s0 = 0; cfg = 0; st = 0;
+					msleep(800);
+					for (k = 0; k < 120; k++) {
+						wcd9335_ifc_read(wcd, 0x50 + ch2->port, &cfg);
+						if (cfg & 0x08) s3++;
+						wcd9335_ifc_read(wcd, 0x90 + ch2->port, &st);
+						if (st) s0++;
+						usleep_range(300, 500);
+					}
+					dev_info(wcd->dev, "PORTACT: port=%u lastcfg=0x%02x bit3seen=%d/120 stat090nz=%d/120 laststat=0x%02x\n",
+						 ch2->port, cfg, s3, s0, st);
+				}
 			}
 		}
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {

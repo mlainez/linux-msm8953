@@ -61,20 +61,109 @@ static int __init adspmem_init(void)
 			continue;
 		}
 		v = V_OF(off);
-		pr_info("adspmem: \"%s\" fmt@0x%08x (off 0x%lx)\n",
-			tgts[t].s, v, (unsigned long)off);
-		for (i = 0; i + 6 < nw && hits < 8; i++) {
+		/* print the FULL format string (decompressed rodata in the
+		 * dump) so the %d arg positions can be interpreted */
+		{
+			char fmt[160]; size_t k;
+			for (k = 0; k < sizeof(fmt) - 1 && p[off + k] &&
+				    p[off + k] >= 0x20 && p[off + k] < 0x7f; k++)
+				fmt[k] = p[off + k];
+			fmt[k] = '\0';
+			pr_info("adspmem: FMT@0x%08x: \"%s\"\n", v, fmt);
+		}
+		for (i = 0; i + 9 < nw && hits < 8; i++) {
 			if (w[i] == v) {
-				/* a log record: word[0]=fmt, word[1..]=args */
-				pr_info("adspmem:   rec@0x%lx args: %u %u %u %u %u %u\n",
+				/* a log record: word[0]=fmt, word[1..]=args.
+				 * print 8 args, signed+unsigned, to read negative
+				 * slot counts and the full satellite-define fields */
+				pr_info("adspmem:   rec@0x%lx args: %d %d %d %d %d %d %d %d\n",
 					(unsigned long)(i * 4),
-					w[i+1], w[i+2], w[i+3],
-					w[i+4], w[i+5], w[i+6]);
+					(int)w[i+1], (int)w[i+2], (int)w[i+3], (int)w[i+4],
+					(int)w[i+5], (int)w[i+6], (int)w[i+7], (int)w[i+8]);
 				hits++;
 			}
 		}
 		if (!hits)
 			pr_info("adspmem:   (no log records reference this fmt)\n");
+	}
+
+	/* Hunt the SLIM controller dev struct via its device_table @ dev+2408
+	 * (16 words, codec entries at idx7=la199 / idx8=la200). Heap objects
+	 * appear to be in the same linear map as the image (VA=0xf0100000+off),
+	 * so a heap pointer is a word in [0xf0100000, 0xf1200000). A device_table
+	 * = 16 consecutive words, idx7 AND idx8 pointer-like, >=10 of 16 zero. */
+#define HEAP_LO 0xf0100000u
+#define HEAP_HI 0xf1200000u
+#define ISPTR(x) ((x) >= HEAP_LO && (x) < HEAP_HI)
+	{
+		int cand = 0;
+		for (i = 0; i + 16 < nw && cand < 12; i++) {
+			int z = 0, j;
+			u32 e8, e7;
+			if (!ISPTR(w[i+7]) || !ISPTR(w[i+8]))
+				continue;
+			for (j = 0; j < 16; j++)
+				if (w[i+j] == 0)
+					z++;
+			if (z < 10)
+				continue;
+			/* candidate device_table at word i => dev = i*4 - 2408 */
+			e7 = w[i+7]; e8 = w[i+8];
+			pr_info("adspmem: DEVTAB? tbl@0x%lx (dev@0x%lx) zeros=%d idx7=0x%08x idx8=0x%08x\n",
+				(unsigned long)(i*4), (unsigned long)(i*4 - 2408), z, e7, e8);
+			/* dev+88 flag */
+			{
+				long devoff = (long)(i*4) - 2408;
+				if (devoff >= 0)
+					pr_info("adspmem:   dev+88=0x%02x\n", p[devoff + 88]);
+			}
+			/* codec PGD entry (idx8) +296 (sat-ctrl) and +300 (gate) */
+			{
+				long eoff = (long)e8 - 0xf0100000;
+				if (eoff >= 0 && eoff + 304 < (long)ADSP_SZ)
+					pr_info("adspmem:   entry8@0x%lx +296=0x%08x +300=0x%08x\n",
+						(unsigned long)eoff,
+						*(const u32 *)(p + eoff + 296),
+						*(const u32 *)(p + eoff + 300));
+			}
+			cand++;
+		}
+		if (!cand)
+			pr_info("adspmem: no device_table candidate found (entries may be NULL => dev+88=0?)\n");
+	}
+	/* FULL log-ring dump: walk the ring region and resolve EVERY fmt-ptr
+	 * (a word in the rodata range [0xf0710000,0xf0735000]) to its string +
+	 * a few args. Reveals ALL ADSP diagnostics during the capture, incl.
+	 * error/warn logs we aren't explicitly targeting. */
+#define ROD_LO 0xf0710000u
+#define ROD_HI 0xf0735000u
+	{
+		size_t lo = 0x940000/4, hi = 0x968000/4, n = 0;
+		pr_info("adspmem: === FULL RING DUMP (0x940000-0x968000) ===\n");
+		for (i = lo; i < hi && i + 5 < nw && n < 220; i++) {
+			u32 fp = w[i];
+			long fo;
+			char s[120]; size_t k;
+			if (fp < ROD_LO || fp >= ROD_HI)
+				continue;
+			fo = (long)fp - 0xf0100000;
+			if (fo < 0 || fo + 4 >= (long)ADSP_SZ)
+				continue;
+			/* require it to look like a printable format string */
+			if (p[fo] != '[' && (p[fo] < 0x20 || p[fo] >= 0x7f))
+				continue;
+			for (k = 0; k < sizeof(s) - 1 && p[fo + k] &&
+				    p[fo + k] >= 0x20 && p[fo + k] < 0x7f; k++)
+				s[k] = p[fo + k];
+			s[k] = '\0';
+			if (k < 6)
+				continue;
+			pr_info("adspmem: R@%06lx \"%s\" | %d %d %d %d\n",
+				(unsigned long)(i*4), s,
+				(int)w[i+1], (int)w[i+2], (int)w[i+3], (int)w[i+4]);
+			n++;
+		}
+		pr_info("adspmem: === END RING DUMP (%zu records) ===\n", n);
 	}
 	memunmap(p);
 	return -EAGAIN;
