@@ -784,6 +784,26 @@ free_rproc:
 	return ret;
 }
 
+static void qcom_pas_shutdown(struct platform_device *pdev)
+{
+	struct qcom_pas *pas = platform_get_drvdata(pdev);
+
+	/*
+	 * On a warm reboot the AP kernel restarts but the PAS remote
+	 * processors (ADSP/modem/wcnss) keep running their firmware with
+	 * stale SLIM/QMI/SMP2P state. The freshly-booted kernel then
+	 * handshakes against a stale remote processor: QMI never
+	 * re-registers, the SLIM satellite stays half-enumerated, and the
+	 * audio sound card fails to come up (the "warm-reboot QMI lottery").
+	 * The platform-driver .shutdown is invoked from device_shutdown()
+	 * on reboot/halt — cleanly stop the remote processor here so the
+	 * next boot brings it up fresh. In-kernel equivalent of the manual
+	 * `echo stop > /sys/class/remoteproc/<rproc>/state` workaround.
+	 */
+	if (pas->rproc->state == RPROC_RUNNING)
+		rproc_shutdown(pas->rproc);
+}
+
 static void qcom_pas_remove(struct platform_device *pdev)
 {
 	struct qcom_pas *pas = platform_get_drvdata(pdev);
@@ -1537,6 +1557,7 @@ MODULE_DEVICE_TABLE(of, qcom_pas_of_match);
 static struct platform_driver qcom_pas_driver = {
 	.probe = qcom_pas_probe,
 	.remove = qcom_pas_remove,
+	.shutdown = qcom_pas_shutdown,
 	.driver = {
 		.name = "qcom_q6v5_pas",
 		.of_match_table = qcom_pas_of_match,

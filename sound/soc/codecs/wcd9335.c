@@ -2228,6 +2228,19 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 				u16 tx_payload_0 = 0, tx_payload_1 = 0;
 				u16 rx_payload = 0;
 				u8  tx_port_min = 0xFF, rx_port_min = 0xFF;
+				/*
+				 * WATER_MARK_VAL per downstream wcd9xxx-slimslave.h:83
+				 * = (SLAVE_PORT_WATER_MARK_12BYTES << 1) | SLAVE_PORT_ENABLE
+				 * = (2<<1) | 1 = 0x05.
+				 * Note: working lineage's PORT_CFG_TX register reads with
+				 * bit3 (0x08) set, but writing 0x0d ourselves caused the
+				 * codec to clear bit0 AND wipe MULTI_CHANNEL — so bit3 is
+				 * a codec-hardware STATUS bit indicating actual bus
+				 * activity, not a config bit. The codec sets it only when
+				 * the SLIMbus framer is actually scheduling slots for the
+				 * port — which mainline isn't getting, despite matching
+				 * downstream's CONNECT_SRC+DEF_ACT_CHAN+REQ_BW+RECONFIG.
+				 */
 				const u8 watermark_val = 0x05;
 
 				list_for_each_entry(ch, &dai_data->slim_ch_list, list) {
@@ -2264,6 +2277,18 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 					u16 mc1_addr = 0x101 + 4 * tx_port_min;
 					u16 cfg_addr = 0x050 + tx_port_min;
 
+					/*
+					 * Write codec TX MULTI_CHANNEL + PORT_CFG
+					 * (watermark 0x05 = (12B WM << 1) | ENABLE).
+					 * Downstream writes the same; the codec framer
+					 * then sets PORT_CFG bit3 (0x08) when it actually
+					 * schedules bus slots — verified on lineage
+					 * (PORT_CFG_TX reads 0x08/0x0c during working
+					 * capture). 2026-05-28: a skip-overwrite
+					 * experiment left CFG=0x00 and bit3 never set;
+					 * reverted because 0x05 is the downstream-correct
+					 * value.
+					 */
 					r1 = wcd9335_ifc_write(wcd, mc0_addr, tx_payload_0 & 0xFF);
 					r2 = wcd9335_ifc_write(wcd, mc1_addr, tx_payload_1 & 0xFF);
 					r3 = wcd9335_ifc_write(wcd, cfg_addr, watermark_val);
@@ -2316,6 +2341,33 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 						 "post-enable: port=%u INT_RX_SRC=0x%02x PORT_CFG=0x%02x MULTI_CH=0x%02x INT_EN0=0x%02x\n",
 						 ch->port, src_val, cfg_val, mc_val, en_val);
 				}
+			}
+
+			/*
+			 * Dump the codec mic-path ACTIVATION registers and
+			 * compare to a live lineage WORKING-capture diff
+			 * (idle->capture). If these don't reach the lineage
+			 * values the codec datapath/clock/bias isn't powered
+			 * and DEC captures silence regardless of SLIM.
+			 */
+			{
+				static const u16 mpr[] = {0x602,
+					0x0a31, 0x0a41, 0x0a51, 0x0a61, 0x0a71,
+					0x0a81, 0x0a91, 0x0aa1, 0x0ab1,
+					0x0d41, 0x0d42, 0x0d6e};
+				char b[200];
+				int ri, bp = 0;
+				unsigned int rv;
+
+				for (ri = 0; ri < ARRAY_SIZE(mpr); ri++) {
+					rv = 0;
+					regmap_read(wcd->regmap, mpr[ri], &rv);
+					bp += scnprintf(b + bp, sizeof(b) - bp,
+						"%03x=%02x ", mpr[ri], rv & 0xff);
+				}
+				dev_info(wcd->dev,
+					"mic-path regs: %s| lineage-cap: 011=03 263=05 601=80 602=84 605=b4 622=50 64a=6e aa1=24 d41=01 d42=0d d6e=40\n",
+					b);
 			}
 		}
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
@@ -2904,6 +2956,26 @@ static const struct snd_soc_dapm_route wcd9335_audio_map[] = {
 	{ "DMIC3", NULL, "MIC BIAS3" },
 	{ "DMIC4", NULL, "MIC BIAS4" },
 	{ "DMIC5", NULL, "MIC BIAS4" },
+
+	/*
+	 * Every AIF stream needs the codec master clock. The "MCLK" supply
+	 * widget (and wcd9335_codec_enable_mclk → wcd9335_enable_mclk, which
+	 * programs ANA_CLK_TOP EXT_CLKBUF/MCLK_EN + FS_CNT) exists but
+	 * upstream never wired it into the DAPM graph, so it never powered
+	 * up: ANA_CLK_TOP stayed 0x00 and the codec datapath had no internal
+	 * clock distribution — capture (and playback) produced only silence.
+	 * A working downstream (tasha) capture shows ANA_CLK_TOP=0x84.
+	 * Make each AIF endpoint depend on MCLK so DAPM enables it (supplies
+	 * are sequenced before datapath widgets).
+	 */
+	{ "AIF1 CAP", NULL, "MCLK" },
+	{ "AIF2 CAP", NULL, "MCLK" },
+	{ "AIF3 CAP", NULL, "MCLK" },
+	{ "AIF1 PB", NULL, "MCLK" },
+	{ "AIF2 PB", NULL, "MCLK" },
+	{ "AIF3 PB", NULL, "MCLK" },
+	{ "AIF4 PB", NULL, "MCLK" },
+	{ "AIF MIX1 PB", NULL, "MCLK" },
 };
 
 static int wcd9335_micbias_control(struct snd_soc_component *component,
@@ -3229,7 +3301,19 @@ static int wcd9335_codec_enable_dec(struct snd_soc_dapm_widget *w,
 				comp, WCD9335_MBHC_ZDET_RAMP_CTL, 0x03);
 		}
 
-		snd_soc_component_update_bits(comp, hpf_gate_reg, 0x01, 0x01);
+		/*
+		 * 2026-05-28: removed `update_bits(hpf_gate_reg, 0x01, 0x01)`
+		 * that USED to be here. It re-gated the decimator's data path
+		 * right after the prior clear, leaving HPF_GATE=1 at the end
+		 * of POST_PMU. Verified live: WCD9335_CDC_TX1_TX_PATH_SEC2
+		 * (0x0a49) was reading 0x01 during capture, decimator output
+		 * was always zero, mic captured silence. Pristine upstream
+		 * wcd9335 (mainline linux/sound/soc/codecs/wcd9335.c) has
+		 * ONLY the clear at POST_PMU — no re-set. Downstream tasha's
+		 * tasha_codec_enable_dec POST_PMU also only clears. The
+		 * re-set was an FP3-specific regression added at some point
+		 * and was the actual cause of the silent mic.
+		 */
 		snd_soc_component_update_bits(comp, tx_vol_ctl_reg, 0x10, 0x00);
 		snd_soc_component_write(
 			comp, tx_gain_ctl_reg,
@@ -3260,8 +3344,15 @@ static u8 wcd9335_get_dmic_clk_val(struct snd_soc_component *component,
 {
 	u8 dmic_ctl_val;
 
+	/*
+	 * FP3+ DMICs run at 2.4 MHz, i.e. DIV_4 at the 9.6 MHz MCLK
+	 * (downstream sets qcom,cdc-dmic-sample-rate=2400000; a working
+	 * lineage capture reads CPE_SS_DMIC0_CTL=0x05 = DIV_4). The generic
+	 * upstream value DIV_2 (4.8 MHz) is 2x too fast for these DMICs and
+	 * the decimator produced only silence. Use DIV_4 for 9.6 MHz.
+	 */
 	if (mclk_rate == WCD9335_MCLK_CLK_9P6MHZ)
-		dmic_ctl_val = WCD9335_DMIC_CLK_DIV_2;
+		dmic_ctl_val = WCD9335_DMIC_CLK_DIV_4;
 	else
 		dmic_ctl_val = WCD9335_DMIC_CLK_DIV_3;
 
@@ -3319,6 +3410,10 @@ static int wcd9335_codec_enable_dmic(struct snd_soc_dapm_widget *w,
 	case SND_SOC_DAPM_PRE_PMU:
 		dmic_rate_val = wcd9335_get_dmic_clk_val(comp, wcd->mclk_rate);
 		(*dmic_clk_cnt)++;
+		dev_info(comp->dev,
+			 "DMIC%u PRE_PMU: clk_cnt=%d rate_val=0x%x reg=0x%x mclk_rate=%u\n",
+			 dmic, *dmic_clk_cnt, dmic_rate_val, dmic_clk_reg,
+			 wcd->mclk_rate);
 		if (*dmic_clk_cnt == 1) {
 			snd_soc_component_update_bits(
 				comp, dmic_clk_reg, 0x07 << dmic_rate_shift,
@@ -3331,6 +3426,9 @@ static int wcd9335_codec_enable_dmic(struct snd_soc_dapm_widget *w,
 	case SND_SOC_DAPM_POST_PMD:
 		dmic_rate_val = wcd9335_get_dmic_clk_val(comp, wcd->mclk_rate);
 		(*dmic_clk_cnt)--;
+		dev_info(comp->dev,
+			 "DMIC%u POST_PMD: clk_cnt=%d\n",
+			 dmic, *dmic_clk_cnt);
 		if (*dmic_clk_cnt == 0) {
 			snd_soc_component_update_bits(comp, dmic_clk_reg,
 						      dmic_clk_en, 0);
@@ -5210,12 +5308,39 @@ static void wcd9335_codec_init(struct snd_soc_component *component)
 	regmap_update_bits(wcd->regmap, WCD9335_CODEC_RPM_CLK_MCLK_CFG,
 			   WCD9335_CODEC_RPM_CLK_MCLK_CFG_MCLK_MASK,
 			   WCD9335_CODEC_RPM_CLK_MCLK_CFG_9P6MHZ);
+	/*
+	 * Match the working downstream codec clock config (the generic
+	 * upstream driver leaves these bits clear, which the codec datapath
+	 * needs):
+	 *  - RPM_CLK_MCLK_CFG bit2: set by downstream tasha_codec_reg_defaults
+	 *    ({RPM_CLK_MCLK_CFG, 0x04, 0x04}); working lineage reads 0x05.
+	 *  - FS_CNT_CONTROL bits 3:2: working lineage reads 0x0d (the FS_CNT
+	 *    enable bit0 is added later by wcd9335_enable_mclk). Mainline
+	 *    read 0x01 here and DMIC capture was silent.
+	 */
+	regmap_update_bits(wcd->regmap, WCD9335_CODEC_RPM_CLK_MCLK_CFG,
+			   0x04, 0x04);
+	regmap_update_bits(wcd->regmap,
+			   WCD9335_CDC_CLK_RST_CTRL_FS_CNT_CONTROL,
+			   0x0c, 0x0c);
 
 	for (i = 0; i < ARRAY_SIZE(wcd9335_codec_reg_init); i++)
 		snd_soc_component_update_bits(component,
 					      wcd9335_codec_reg_init[i].reg,
 					      wcd9335_codec_reg_init[i].mask,
 					      wcd9335_codec_reg_init[i].val);
+
+	/*
+	 * The ANA page (0x06xx) registers — ANA_MICB1/2/3, ANA_AMICn, etc. —
+	 * are silently rejected by the codec when ANA_BIAS isn't enabled.
+	 * Verified live: lineage has ANA_BIAS set (multiple 0x06xx regs at
+	 * non-default values) and its codec_init writes land; mainline had
+	 * ANA_BIAS=0 here and every ANA_MICB write silently failed (MICB2/3
+	 * stayed 0x00 after the voltage write below). Enable master_bias
+	 * first; we leave it on (refcount keeps it enabled even after the
+	 * efuse_sensing enable/disable cycle below).
+	 */
+	wcd9335_enable_master_bias(wcd);
 
 	/*
 	 * Pre-set mic bias voltage in bits 5:0 of ANA_MICB registers.
@@ -5228,6 +5353,22 @@ static void wcd9335_codec_init(struct snd_soc_component *component)
 				      0x3F, 0x22);
 	snd_soc_component_update_bits(component, WCD9335_ANA_MICB3,
 				      0x3F, 0x22);
+	/*
+	 * 2026-05-28 empirical: the DAPM "MIC BIAS{1,2,3}" supply widgets
+	 * report "On" during capture (in the active dependency chain) but
+	 * the wcd9335_codec_enable_micbias PRE_PMU write never lands —
+	 * ANA_MICB{1,2,3} bits[7:6] read 00 (DISABLE) during active capture
+	 * on every path tried (DMIC1, AMIC2, AMIC5). Working lineage shows
+	 * MICB2 = 0xe0 (bits[7:6]=11) during its tinycap. Force-enable
+	 * MICB1..3 at codec init so analog mics actually get bias. Bits[7:6]
+	 * = 01 = MICB_ENABLE; combined with the voltage already set above.
+	 */
+	snd_soc_component_update_bits(component, WCD9335_ANA_MICB1,
+				      0xC0, 0x40);
+	snd_soc_component_update_bits(component, WCD9335_ANA_MICB2,
+				      0xC0, 0x40);
+	snd_soc_component_update_bits(component, WCD9335_ANA_MICB3,
+				      0xC0, 0x40);
 
 	wcd9335_enable_efuse_sensing(component);
 }
@@ -5641,6 +5782,25 @@ static bool wcd9335_is_volatile_register(struct device *dev, unsigned int reg)
 	case WCD9335_ANA_MICB2:
 	case WCD9335_ANA_RCO:
 	case WCD9335_ANA_BIAS:
+	/*
+	 * 2026-05-29: the codec HW auto-modifies these clock-enable
+	 * registers (MCLK_EN auto-clears, dig-core power-collapse, DMIC
+	 * clock gating), so the regmap cache diverges from HW. With them
+	 * cached, regmap_update_bits() during capture reads the stale
+	 * cache (which still shows the bits set from bring_up) and SKIPS
+	 * the real re-enable write — leaving HW with the clock OFF
+	 * (verified: ANA_CLK_TOP reads 0x00 + DMIC CPE_SS_DMIC0_CTL reads
+	 * 0x04 mid-capture while ANA_RCO/ANA_BIAS, which are volatile,
+	 * read correctly). Mark them volatile so update_bits always does
+	 * a real HW read-modify-write.
+	 */
+	case WCD9335_ANA_CLK_TOP:
+	case WCD9335_CDC_CLK_RST_CTRL_MCLK_CONTROL:
+	case WCD9335_CDC_CLK_RST_CTRL_FS_CNT_CONTROL:
+	case WCD9335_CPE_SS_DMIC0_CTL:
+	case WCD9335_CPE_SS_DMIC1_CTL:
+	case WCD9335_CPE_SS_DMIC2_CTL:
+	case WCD9335_CODEC_RPM_PWR_CDC_DIG_HM_CTL:
 		return true;
 	default:
 		return false;
@@ -5967,6 +6127,20 @@ static int wcd9335_slim_probe(struct slim_device *slim)
 		dev_warn(dev, "clk_set_rate(9.6MHz) failed: %d\n", ret);
 
 	dev_info(dev, "MCLK enabled at %lu Hz\n", clk_get_rate(wcd->mclk));
+
+	/*
+	 * Record the actual MCLK rate. The apq8016_sbc machine driver's
+	 * apq8016_dai_init() only handles MI2S cpu-DAI ids; for the SLIM
+	 * backends (SLIMBUS_0_TX/RX) it returns -EINVAL before reaching the
+	 * snd_soc_component_set_sysclk() loop, so wcd9335_codec_set_sysclk()
+	 * is never called and wcd->mclk_rate would stay 0. With mclk_rate==0
+	 * wcd9335_get_dmic_clk_val() falls to DIV_3 (DMIC clk = mclk/3 =
+	 * 3.2 MHz at 9.6 MHz MCLK), which is wrong for 9.6 MHz (should be
+	 * DIV_2 = 4.8 MHz) and makes the TX decimator emit silence. Seed it
+	 * here from the clock we just enabled so DMIC capture works even
+	 * without the machine driver calling set_sysclk.
+	 */
+	wcd->mclk_rate = clk_get_rate(wcd->mclk);
 
 	/* Enable SLIMbus clock (bb_clk1) - the codec needs this for bus framing */
 	ret = clk_prepare_enable(wcd->native_clk);
