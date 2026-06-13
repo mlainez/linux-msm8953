@@ -231,6 +231,8 @@ struct smb_init_register {
  * @gen:		Generation of SMBx hardware block
  * @current_step_size_ua: Step size of current limits in uA
  * @current_limit_max_ua: Maximum charging current in uA
+ * @float_voltage_base_uv: Float-voltage register zero point in uV
+ * @float_voltage_step_uv: Float-voltage register step in uV
  * @status_change_work: Worker to handle plug/unplug events
  * @cable_irq:		USB plugin IRQ
  * @wakeup_enabled:	If the cable IRQ will cause a wakeup
@@ -247,6 +249,8 @@ struct smb_chip {
 	enum smb_generation gen;
 	unsigned int current_step_size_ua;
 	unsigned int current_limit_max_ua;
+	unsigned int float_voltage_base_uv;
+	unsigned int float_voltage_step_uv;
 
 	struct delayed_work status_change_work;
 	int cable_irq;
@@ -265,6 +269,8 @@ struct smb_match_data {
 	const struct smb_init_register *init_seq;
 	unsigned int current_step_size_ua;
 	unsigned int current_limit_max_ua;
+	unsigned int float_voltage_base_uv;
+	unsigned int float_voltage_step_uv;
 };
 
 static enum power_supply_property smb_properties[] = {
@@ -965,6 +971,8 @@ struct smb_match_data pmi8998_match_data = {
 	.gen = SMB2,
 	.current_step_size_ua = 25000,
 	.current_limit_max_ua = 4800000,
+	.float_voltage_base_uv = 3480000,
+	.float_voltage_step_uv = 7500,
 };
 
 struct smb_match_data pm660_match_data = {
@@ -974,6 +982,8 @@ struct smb_match_data pm660_match_data = {
 	.gen = SMB2,
 	.current_step_size_ua = 25000,
 	.current_limit_max_ua = 4800000,
+	.float_voltage_base_uv = 3480000,
+	.float_voltage_step_uv = 7500,
 };
 
 struct smb_match_data pm8150b_match_data = {
@@ -983,6 +993,8 @@ struct smb_match_data pm8150b_match_data = {
 	.gen = SMB5,
 	.current_step_size_ua = 50000,
 	.current_limit_max_ua = 5000000,
+	.float_voltage_base_uv = 3480000,
+	.float_voltage_step_uv = 7500,
 };
 
 struct smb_match_data pm7250b_match_data = {
@@ -992,6 +1004,25 @@ struct smb_match_data pm7250b_match_data = {
 	.gen = SMB5,
 	.current_step_size_ua = 50000,
 	.current_limit_max_ua = 5000000,
+	.float_voltage_base_uv = 3480000,
+	.float_voltage_step_uv = 7500,
+};
+
+/*
+ * PMI632 is an SMB5-generation charger. It differs from pm8150b in its
+ * float-voltage encoding (10 mV steps from 3600 mV, vs 7.5 mV from 3480 mV).
+ * NOTE: the float-voltage encoding and init sequence are inherited from the
+ * downstream PMI632 charger and still need on-device validation.
+ */
+struct smb_match_data pmi632_match_data = {
+	.init_seq = smb5_init_seq,
+	.init_seq_len = ARRAY_SIZE(smb5_init_seq),
+	.name = "pmi632",
+	.gen = SMB5,
+	.current_step_size_ua = 50000,
+	.current_limit_max_ua = 3000000,
+	.float_voltage_base_uv = 3600000,
+	.float_voltage_step_uv = 10000,
 };
 
 
@@ -1078,6 +1109,8 @@ static int smb_probe(struct platform_device *pdev)
 	chip->gen = match_data->gen;
 	chip->current_step_size_ua = match_data->current_step_size_ua;
 	chip->current_limit_max_ua = match_data->current_limit_max_ua;
+	chip->float_voltage_base_uv = match_data->float_voltage_base_uv;
+	chip->float_voltage_step_uv = match_data->float_voltage_step_uv;
 
 	dev_info(chip->dev, "Generation %s\n", chip->gen == SMB2 ? "SMB2" : "SMB5");
 
@@ -1117,7 +1150,8 @@ static int smb_probe(struct platform_device *pdev)
 		return dev_err_probe(chip->dev, rc,
 				     "Failed to init status change work\n");
 
-	rc = (chip->batt_info->voltage_max_design_uv - 3487500) / 7500 + 1;
+	rc = (chip->batt_info->voltage_max_design_uv -
+	      chip->float_voltage_base_uv) / chip->float_voltage_step_uv;
 	rc = regmap_update_bits(chip->regmap, chip->base + FLOAT_VOLTAGE_CFG,
 				FLOAT_VOLTAGE_SETTING_MASK, rc);
 	if (rc < 0)
@@ -1179,6 +1213,7 @@ static const struct of_device_id smb_match_id_table[] = {
 	{ .compatible = "qcom,pm660-charger", .data = &pm660_match_data },
 	{ .compatible = "qcom,pm7250b-charger", .data = &pm7250b_match_data },
 	{ .compatible = "qcom,pm8150b-charger", .data = &pm8150b_match_data },
+	{ .compatible = "qcom,pmi632-charger", .data = &pmi632_match_data },
 	{ /* sentinal */ }
 };
 MODULE_DEVICE_TABLE(of, smb_match_id_table);
