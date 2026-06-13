@@ -14,6 +14,7 @@ properties:
     enum:
       - qcom,pmi8998-charger
       - qcom,pm660-charger
+      - qcom,pmi632-charger
 
   reg:
     maxItems: 1
