@@ -326,7 +326,7 @@
 &pmi632_flash {
 	status = "okay";
 
-	led-0 {
+	fp3_flash_led0: led-0 {
 		function = LED_FUNCTION_FLASH;
 		color = <LED_COLOR_ID_WHITE>;
 		led-sources = <1>;
@@ -336,7 +336,7 @@
 		function-enumerator = <0>;
 	};
 
-	led-1 {
+	fp3_flash_led1: led-1 {
 		function = LED_FUNCTION_FLASH;
 		color = <LED_COLOR_ID_WHITE>;
 		led-sources = <2>;
