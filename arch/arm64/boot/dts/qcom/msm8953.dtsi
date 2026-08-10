@@ -1880,6 +1880,45 @@
 			};
 		};
 
+		slimbam: dma-controller@c104000 {
+			compatible = "qcom,bam-v1.7.0";
+			qcom,controlled-remotely;
+			reg = <0x0c104000 0x2a000>;
+			num-channels = <31>;
+			interrupts = <GIC_SPI 180 IRQ_TYPE_LEVEL_HIGH>;
+			#dma-cells = <1>;
+			qcom,ee = <1>;
+			qcom,num-ees = <2>;
+		};
+
+		slim_msm: slim-ngd@c140000 {
+			compatible = "qcom,slim-ngd-msm8953";
+			reg = <0x0c140000 0x2c000>,
+			      <0x0c104000 0x2a000>;
+			reg-names = "slimbus_physical",
+				    "slimbus_bam_physical";
+			interrupts = <GIC_SPI 163 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 180 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "slimbus_irq",
+					  "slimbus_bam_irq";
+			cell-index = <1>;
+			qcom,apps-ch-pipes = <0x600000>;
+			qcom,ea-pc = <0x200>;
+			/*
+			 * BAM DMA pipes for NGD message queues.
+			 * Pipe indices derived from NGD_STATUS[9:2] = 3.
+			 * RX = pipe 3 (BAM producer, AP consumes),
+			 * TX = pipe 4 (BAM consumer, AP produces).
+			 */
+			dmas = <&slimbam 3>, <&slimbam 4>,
+			       <&slimbam 21>, <&slimbam 22>;
+			dma-names = "rx", "tx",
+				    "data-port0", "data-port1";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+		};
+
 		cci: cci@1b0c000 {
 			compatible = "qcom,msm8974-cci";
 			reg = <0x1b0c000 0x1000>;

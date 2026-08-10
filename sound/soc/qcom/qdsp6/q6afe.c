@@ -35,6 +35,10 @@
 #define AFE_MODULE_TDM			0x0001028A
 
 #define AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG 0x00010235
+#define AFE_MODULE_CDC_DEV_CFG		0x00010234
+#define AFE_PARAM_ID_CDC_REG_CFG	0x00010236
+#define AFE_PARAM_ID_CDC_REG_CFG_INIT	0x00010237
+#define AFE_PARAM_ID_CDC_REG_PAGE_CFG	0x00010296
 #define AFE_PARAM_ID_USB_AUDIO_DEV_PARAMS    0x000102A5
 #define AFE_PARAM_ID_USB_AUDIO_DEV_LPCM_FMT 0x000102AA
 
@@ -380,6 +384,7 @@ struct q6afe {
 	wait_queue_head_t wait;
 	struct list_head port_list;
 	spinlock_t port_list_lock;
+	u32 mmap_handle;
 };
 
 struct afe_port_cmd_device_start {
@@ -980,6 +985,7 @@ static int q6afe_callback(struct apr_device *adev, struct apr_resp_pkt *data)
 		case AFE_PORT_CMD_DEVICE_STOP:
 		case AFE_PORT_CMD_DEVICE_START:
 		case AFE_SVC_CMD_SET_PARAM:
+		case 0x000100EA: /* AFE_SERVICE_CMD_SHARED_MEM_MAP_REGIONS */
 			port = q6afe_find_port(afe, hdr->token);
 			if (port) {
 				port->result = *res;
@@ -999,6 +1005,13 @@ static int q6afe_callback(struct apr_device *adev, struct apr_resp_pkt *data)
 	case AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST:
 		afe->result.opcode = hdr->opcode;
 		afe->result.status = res->status;
+		wake_up(&afe->wait);
+		break;
+	case 0x000100EB: /* AFE_SERVICE_CMDRSP_SHARED_MEM_MAP_REGIONS */
+		afe->mmap_handle = *((u32 *)data->payload);
+		afe->result.opcode = 0x000100EA; /* match waiter */
+		afe->result.status = 0;
+		dev_info(afe->dev, "AFE mmap_handle = 0x%x\n", afe->mmap_handle);
 		wake_up(&afe->wait);
 		break;
 	default:
@@ -1334,6 +1347,10 @@ void q6afe_slim_port_prepare(struct q6afe_port *port,
 	pcfg->slim_cfg.shared_ch_mapping[2] = cfg->ch_mapping[2];
 	pcfg->slim_cfg.shared_ch_mapping[3] = cfg->ch_mapping[3];
 
+	pr_info("q6afe: SLIM port 0x%x cfg: rate=%d bw=%d nch=%d ch=[%d,%d,%d,%d]\n",
+		port->id, cfg->sample_rate, cfg->bit_width, cfg->num_channels,
+		cfg->ch_mapping[0], cfg->ch_mapping[1],
+		cfg->ch_mapping[2], cfg->ch_mapping[3]);
 }
 EXPORT_SYMBOL_GPL(q6afe_slim_port_prepare);
 
@@ -1659,6 +1676,277 @@ EXPORT_SYMBOL_GPL(q6afe_cdc_dma_port_prepare);
  *
  * Return: Will be an negative on packet size on success.
  */
+/*
+ * Send WCD9335 CDC register configuration to ADSP.
+ *
+ * ==========================================================================
+ * PURPOSE: Tell the ADSP where each codec register lives inside the SLIMbus
+ * address space. Once the ADSP has these mappings, it can drive codec
+ * functionality (MAD wake-on-voice, PGD port enable/watermark, AANC feedback
+ * loop) autonomously from its internal state machines — it does NOT need the
+ * CPU to send CHANGE_VALUE messages for these registers. The mapping is
+ * CRUCIAL for SLIMbus data-flow because the ADSP reaches for PGD port
+ * enable/watermark registers internally when ramping up a stream.
+ *
+ * SOURCE: downstream /techpack/audio/asoc/codecs/wcd9335.c audio_reg_cfg[]
+ *         and /techpack/audio/asoc/msm8952-slimbus.c msm_afe_set_config().
+ *
+ * DOWNSTREAM SEQUENCE (msm_afe_set_config, in order):
+ *   1. AFE_CDC_REGISTERS_CONFIG    — 22 register map entries (THIS FUNCTION)
+ *   2. AFE_CDC_REGISTER_PAGE_CONFIG — enable codec paging
+ *   3. AFE_SLIMBUS_SLAVE_CONFIG    — codec EA + port offsets
+ *   4. AFE_AANC_VERSION            — AANC hw version
+ *   5. AFE_CDC_CLIP_REGISTERS_CONFIG — NULL for tasha (skipped)
+ *   6. AFE_CLIP_BANK_SEL           — NULL for tasha (skipped)
+ *   7. AFE_CDC_REGISTER_PAGE_CONFIG — re-send (idempotent)
+ * Plus AFE_CDC_REG_CFG_INIT somewhere (via afe_send_codec_reg_config).
+ *
+ * Must be sent once before the first SLIMbus port start (AFE_DEVICE_START).
+ *
+ * HISTORICAL NOTE: this function previously sent only 4 of the 22 entries
+ * under the belief that "extras confuse the ADSP". That was a misdiagnosis —
+ * downstream sends all 22 and works. The restriction was removed 2026-04-17.
+ *
+ * TESTED 2026-04-17: all 22 entries + AANC_VERSION accepted by ADSP (all
+ * replies OK). However earpiece PSTAT remains 0x00. So the missing/trimmed
+ * CDC_REG_CFG was NOT the earpiece-silence bug. Keep the full table here
+ * for protocol conformance and as a precondition for anything else that
+ * might matter, but it's not a bandaid for PSTAT=0.
+ *
+ * Field type enum values come from downstream wcd9xxx-common-v2.h:162+:
+ *   RESERVED=0, HW_MAD_AUDIO_ENABLE=4, HW_MAD_AUDIO_SLEEP_TIME=7,
+ *   HW_MAD_TX_AUDIO_SWITCH_OFF=10, MAD_AUDIO_INT_DEST_SELECT_REG=13,
+ *   VBAT_INT_DEST_SELECT_REG=17, MAD_AUDIO_INT_MASK_REG=18,
+ *   VBAT_INT_MASK_REG=22, MAD_AUDIO_INT_STATUS_REG=23,
+ *   VBAT_INT_STATUS_REG=27, MAD_AUDIO_INT_CLEAR_REG=28,
+ *   VBAT_INT_CLEAR_REG=32, SB_PGD_PORT_TX_WATERMARK_N=33,
+ *   SB_PGD_PORT_TX_ENABLE_N=34, SB_PGD_PORT_RX_WATERMARK_N=35,
+ *   SB_PGD_PORT_RX_ENABLE_N=36, AANC_FF_GAIN_ADAPTIVE=41,
+ *   AANC_FFGAIN_ADAPTIVE_EN=42, AANC_GAIN_CONTROL=43,
+ *   VBAT_RELEASE_INT_DEST_SELECT_REG=53, VBAT_RELEASE_INT_MASK_REG=54,
+ *   VBAT_RELEASE_INT_STATUS_REG=55, VBAT_RELEASE_INT_CLEAR_REG=56.
+ *
+ * Register addresses = TASHA_REGISTER_START_OFFSET(0x800) + register_offset.
+ *   WCD9335_SOC_MAD_MAIN_CTL_1  = 0x0281 → 0x0A81
+ *   WCD9335_SOC_MAD_AUDIO_CTL_3 = 0x0285 → 0x0A85
+ *   WCD9335_SOC_MAD_AUDIO_CTL_4 = 0x0286 → 0x0A86
+ *   WCD9335_INTR_CFG            = 0x0081 → 0x0881
+ *   WCD9335_INTR_PIN2_MASK3     = 0x00A4 → 0x08A4
+ *   WCD9335_INTR_PIN2_STATUS3   = 0x00AC → 0x08AC
+ *   WCD9335_INTR_PIN2_CLEAR3    = 0x00B4 → 0x08B4
+ *   TASHA_SB_PGD_PORT_TX_BASE   = 0x0050 → 0x0850
+ *   TASHA_SB_PGD_PORT_RX_BASE   = 0x0040 → 0x0840
+ *   WCD9335_CDC_ANC0_IIR_ADAPT_CTL = 0x0A0B → 0x120B
+ *   WCD9335_CDC_ANC0_FF_A_GAIN_CTL = 0x0A0E → 0x120E
+ *
+ * Bit width is 8 everywhere (WCD9335_REG_BITS=8). Offset scale is 0 for
+ * single-register entries, 1 for the SB_PGD port entries (these are
+ * parameterised by port number — ADSP computes final addr = base + port).
+ */
+static void q6afe_send_cdc_config(struct q6afe *afe)
+{
+	static bool cdc_config_sent;
+	int i, ret;
+
+	if (cdc_config_sent)
+		return;
+	cdc_config_sent = true;
+
+	/*
+	 * Full 22-entry CDC register map, matching downstream tasha_audio_reg_cfg.
+	 *   columns: { minor_version, reg_logical_addr, reg_field_type,
+	 *              reg_field_bit_mask, reg_bit_width, reg_offset_scale }
+	 */
+	struct {
+		u32 minor_version;
+		u32 reg_logical_addr;
+		u32 reg_field_type;
+		u32 reg_field_bit_mask;
+		u16 reg_bit_width;
+		u16 reg_offset_scale;
+	} __packed cdc_regs[] = {
+		/* MAD (Microphone Activity Detection) — wake-on-voice */
+		{ 1, 0x0A81,  4, 0x01, 8, 0 }, /* HW_MAD_AUDIO_ENABLE        @ SOC_MAD_MAIN_CTL_1 */
+		{ 1, 0x0A85,  7, 0x0F, 8, 0 }, /* HW_MAD_AUDIO_SLEEP_TIME    @ SOC_MAD_AUDIO_CTL_3 */
+		{ 1, 0x0A86, 10, 0x01, 8, 0 }, /* HW_MAD_TX_AUDIO_SWITCH_OFF @ SOC_MAD_AUDIO_CTL_4 */
+		/* MAD audio-level interrupts */
+		{ 1, 0x0881, 13, 0x02, 8, 0 }, /* MAD_AUDIO_INT_DEST_SELECT  @ INTR_CFG */
+		{ 1, 0x08A4, 18, 0x01, 8, 0 }, /* MAD_AUDIO_INT_MASK         @ INTR_PIN2_MASK3 */
+		{ 1, 0x08AC, 23, 0x01, 8, 0 }, /* MAD_AUDIO_INT_STATUS       @ INTR_PIN2_STATUS3 */
+		{ 1, 0x08B4, 28, 0x01, 8, 0 }, /* MAD_AUDIO_INT_CLEAR        @ INTR_PIN2_CLEAR3 */
+		/* VBAT level interrupts */
+		{ 1, 0x0881, 17, 0x02, 8, 0 }, /* VBAT_INT_DEST_SELECT       @ INTR_CFG */
+		{ 1, 0x08A4, 22, 0x08, 8, 0 }, /* VBAT_INT_MASK              @ INTR_PIN2_MASK3 */
+		{ 1, 0x08AC, 27, 0x08, 8, 0 }, /* VBAT_INT_STATUS            @ INTR_PIN2_STATUS3 */
+		{ 1, 0x08B4, 32, 0x08, 8, 0 }, /* VBAT_INT_CLEAR             @ INTR_PIN2_CLEAR3 */
+		/* VBAT release interrupts */
+		{ 1, 0x0881, 53, 0x02, 8, 0 }, /* VBAT_RELEASE_INT_DEST_SELECT @ INTR_CFG */
+		{ 1, 0x08A4, 54, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_MASK        @ INTR_PIN2_MASK3 */
+		{ 1, 0x08AC, 55, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_STATUS      @ INTR_PIN2_STATUS3 */
+		{ 1, 0x08B4, 56, 0x10, 8, 0 }, /* VBAT_RELEASE_INT_CLEAR       @ INTR_PIN2_CLEAR3 */
+		/* SLIMbus PGD port enable/watermark — KEY FOR DATA FLOW */
+		{ 1, 0x0850, 33, 0x1E, 8, 1 }, /* SB_PGD_PORT_TX_WATERMARK_N */
+		{ 1, 0x0850, 34, 0x01, 8, 1 }, /* SB_PGD_PORT_TX_ENABLE_N */
+		{ 1, 0x0840, 35, 0x1E, 8, 1 }, /* SB_PGD_PORT_RX_WATERMARK_N */
+		{ 1, 0x0840, 36, 0x01, 8, 1 }, /* SB_PGD_PORT_RX_ENABLE_N */
+		/* AANC (Adaptive Active Noise Cancellation) */
+		{ 1, 0x120B, 41, 0x04, 8, 0 }, /* AANC_FF_GAIN_ADAPTIVE      @ ANC0_IIR_ADAPT_CTL */
+		{ 1, 0x120B, 42, 0x08, 8, 0 }, /* AANC_FFGAIN_ADAPTIVE_EN    @ ANC0_IIR_ADAPT_CTL */
+		{ 1, 0x120E, 43, 0xFF, 8, 0 }, /* AANC_GAIN_CONTROL          @ ANC0_FF_A_GAIN_CTL */
+	};
+
+	for (i = 0; i < ARRAY_SIZE(cdc_regs); i++) {
+		ret = q6afe_set_param(afe, NULL, &cdc_regs[i],
+				      AFE_PARAM_ID_CDC_REG_CFG,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      sizeof(cdc_regs[i]),
+				      AFE_CLK_TOKEN);
+		if (ret)
+			dev_warn(afe->dev, "CDC_REG_CFG[%d] type=%d: %d\n",
+				 i, cdc_regs[i].reg_field_type, ret);
+		else
+			dev_info(afe->dev, "CDC_REG_CFG[%d] type=%d: OK\n",
+				 i, cdc_regs[i].reg_field_type);
+	}
+
+	/* CDC_REG_PAGE_CFG: enable register paging, proc_id=1 */
+	{
+		struct {
+			u32 minor_version;
+			u32 enable;
+			u32 proc_id;
+		} __packed page_cfg = { 1, 1, 1 };
+
+		ret = q6afe_set_param(afe, NULL, &page_cfg,
+				      AFE_PARAM_ID_CDC_REG_PAGE_CFG,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      sizeof(page_cfg), AFE_CLK_TOKEN);
+		if (ret)
+			dev_warn(afe->dev, "CDC_REG_PAGE_CFG: %d\n", ret);
+	}
+
+	/* CDC_SLIMBUS_SLAVE_CFG: codec EA + port offsets.
+	 * Previously failed with EINVAL because minor_version was missing.
+	 */
+	{
+		struct {
+			u32 minor_version;
+			u32 device_enum_addr_lsw;
+			u32 device_enum_addr_msw;
+			u16 tx_slave_port_offset;
+			u16 rx_slave_port_offset;
+		} __packed slave_cfg = {
+			.minor_version = 1,
+			/*
+			 * WCD9335 PGD EA: manf=0x0217 prod=0x01a0 dev_idx=1 inst=0
+			 * Packed as downstream tasha_init_slim_slave_cfg():
+			 *   memcpy(&eaddr, e_addr, 6) on LE → eaddr = 0x0000021701A00100
+			 *   ea_lsw = eaddr & 0xFFFFFFFF = 0x01A00100
+			 *   ea_msw = eaddr >> 32 = 0x0217
+			 */
+			.device_enum_addr_lsw = 0x01a00100,
+			.device_enum_addr_msw = 0x00000217,
+			.tx_slave_port_offset = 0,
+			.rx_slave_port_offset = 16,
+		};
+
+		ret = q6afe_set_param(afe, NULL, &slave_cfg,
+				      AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      sizeof(slave_cfg), AFE_CLK_TOKEN);
+		if (ret)
+			dev_warn(afe->dev, "CDC_SLIMBUS_SLAVE_CFG: %d\n", ret);
+		else
+			dev_info(afe->dev, "CDC_SLIMBUS_SLAVE_CFG: OK\n");
+	}
+
+	/*
+	 * AFE_PARAM_ID_CDC_AANC_VERSION (0x0001023A) — AANC hardware version.
+	 * Downstream struct afe_param_id_cdc_aanc_version:
+	 *   u32 cdc_aanc_minor_version;  // AFE_API_VERSION_CDC_AANC_VERSION = 1
+	 *   u32 aanc_hw_version;         // AANC_HW_BLOCK_VERSION_2 = 2 for tasha
+	 * Module: AFE_MODULE_CDC_DEV_CFG.
+	 * Not sent previously on mainline; added 2026-04-17 to match downstream.
+	 */
+#define AFE_PARAM_ID_CDC_AANC_VERSION	0x0001023A
+	{
+		struct {
+			u32 cdc_aanc_minor_version;
+			u32 aanc_hw_version;
+		} __packed aanc_ver = {
+			.cdc_aanc_minor_version = 1,
+			.aanc_hw_version = 2, /* AANC_HW_BLOCK_VERSION_2 */
+		};
+
+		ret = q6afe_set_param(afe, NULL, &aanc_ver,
+				      AFE_PARAM_ID_CDC_AANC_VERSION,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      sizeof(aanc_ver), AFE_CLK_TOKEN);
+		if (ret)
+			dev_warn(afe->dev, "CDC_AANC_VERSION: %d\n", ret);
+		else
+			dev_info(afe->dev, "CDC_AANC_VERSION: OK\n");
+	}
+
+	/* CDC_REG_CFG_INIT: finalize configuration */
+	{
+		u32 init = 1;
+
+		ret = q6afe_set_param(afe, NULL, &init,
+				      AFE_PARAM_ID_CDC_REG_CFG_INIT,
+				      AFE_MODULE_CDC_DEV_CFG,
+				      sizeof(init), AFE_CLK_TOKEN);
+		if (ret)
+			dev_warn(afe->dev, "CDC_REG_CFG_INIT: %d\n", ret);
+	}
+
+	/*
+	 * AFE_PARAM_ID_SLIMBUS_SLAVE_PORT_CFG (0x00010233):
+	 * Tells the ADSP the PGD and IFC device logical addresses so
+	 * the AFE can route audio data to the correct SLIMbus device.
+	 * Without this, the ADSP accepts all control messages but can't
+	 * link the AFE audio output to the codec's PGD ports.
+	 *
+	 * Downstream: tasha_slimbus_slave_port_cfg in wcd9335.c,
+	 * sent via afe_send_slimbus_slave_port_cfg() with
+	 * module_id = AFE_MODULE_HW_MAD.
+	 *
+	 * PGD LA=200, IFC LA=199 (from ADDR_QUERY at boot).
+	 */
+	{
+		struct {
+			u32 minor_version;
+			u16 slimbus_dev_id;
+			u16 slave_dev_pgd_la;
+			u16 slave_dev_intfdev_la;
+			u16 bit_width;
+			u16 data_format;
+			u16 num_channels;
+			u16 slave_port_mapping[8];
+		} __packed slave_port_cfg = {
+			.minor_version = 1,
+			.slimbus_dev_id = 0, /* AFE_SLIMBUS_DEVICE_1 */
+			.slave_dev_pgd_la = 200,
+			.slave_dev_intfdev_la = 199,
+			.bit_width = 16,
+			.data_format = 0,
+			.num_channels = 1,
+			.slave_port_mapping = { 0 },
+		};
+
+#define AFE_MODULE_HW_MAD		0x00010230
+#define AFE_PARAM_ID_SLIMBUS_SLAVE_PORT_CFG 0x00010233
+
+		/* SLAVE_PORT_CFG: disabled — AFE_MODULE_HW_MAD not available
+		 * on this firmware (returns -ETIMEDOUT). The downstream
+		 * sends this but only for MAD/always-on-listening, not for
+		 * normal audio playback.
+		 */
+	}
+
+	dev_info(afe->dev, "CDC config sent to ADSP\n");
+}
+
 int q6afe_port_start(struct q6afe_port *port)
 {
 	struct afe_port_cmd_device_start *start;
@@ -1669,6 +1957,30 @@ int q6afe_port_start(struct q6afe_port *port)
 	int pkt_size;
 	void *p __free(kfree) = NULL;
 
+	/* Send CDC config before first SLIMbus port start */
+	if (port_id == 0x4000 || port_id == 0x4001)
+		q6afe_send_cdc_config(afe);
+
+	/* Dump the raw port config for SLIMbus ports */
+	if (port_id >= 0x4000 && port_id <= 0x400d) {
+		struct afe_param_id_slimbus_cfg *sc = &port->port_cfg.slim_cfg;
+
+		dev_info(afe->dev,
+			 "AFE SLIM 0x%x: ver=%d dev_id=%d bw=%d fmt=%d nch=%d rate=%d ch=[%d,%d,%d,%d] param_id=0x%x size=%zu\n",
+			 port_id, sc->sb_cfg_minor_version,
+			 sc->slimbus_dev_id, sc->bit_width,
+			 sc->data_format, sc->num_channels,
+			 sc->sample_rate,
+			 sc->shared_ch_mapping[0], sc->shared_ch_mapping[1],
+			 sc->shared_ch_mapping[2], sc->shared_ch_mapping[3],
+			 param_id, sizeof(port->port_cfg));
+	}
+
+	/*
+	 * Send full union size, matching downstream behavior.
+	 * Downstream: config.pdata.param_size = sizeof(config.port)
+	 * where config.port is union afe_port_config.
+	 */
 	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
 				       AFE_MODULE_AUDIO_DEV_INTERFACE,
 				       sizeof(port->port_cfg));
@@ -1712,6 +2024,10 @@ int q6afe_port_start(struct q6afe_port *port)
 	if (ret)
 		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\n",
 			port_id, ret);
+	else
+		dev_info(afe->dev,
+			 "AFE DEVICE_START 0x%x: OK (result=0x%x)\n",
+			 port_id, port->result.status);
 
 	return ret;
 }
