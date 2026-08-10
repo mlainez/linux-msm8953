@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Fairphone 3+ loudspeaker module: TI TAS2557 mono amplifier on
+ * blsp_i2c6, driven over Quinary MI2S.
+ *
+ * Applied by drivers/misc/fp3_module_slot.c when 0x4c acknowledges on
+ * the speaker slot's bus.
+ *
+ * Note that the enable line (GPIO 21) is shared with the Fairphone 3's
+ * AW8898 but means the opposite thing: here it is an active-high
+ * shutdown, there an active-low reset.
+ */
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+&i2c_6 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	fp3_speaker_amp: audio-amplifier@4c {
+		compatible = "ti,tas2557";
+		reg = <0x4c>;
+
+		shutdown-gpios = <&tlmm 21 GPIO_ACTIVE_HIGH>;
+		interrupts-extended = <&tlmm 20 IRQ_TYPE_LEVEL_HIGH>;
+
+		dvdd-supply = <&pm8953_l5>;
+		vddio-supply = <&pm8953_l5>;
+		vdd-supply = <&vph_pwr>;
+
+		#sound-dai-cells = <0>;
+	};
+};
+
+&sound_card {
+	model = "Fairphone 3+";
+	status = "okay";
+
+	audio-routing = "Speaker", "OUT";
+	widgets = "Speaker", "Speaker";
+	pin-switches = "Speaker";
+};
+
+/*
+ * The link itself is declared in the base device tree so that it keeps its
+ * position after the MultiMedia links — see the comment there. Only the
+ * codec depends on which loudspeaker module is fitted.
+ */
+&fp3_quinary_link {
+	codec {
+		sound-dai = <&fp3_speaker_amp>;
+	};
+};
