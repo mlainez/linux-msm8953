@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Fairphone 3 loudspeaker module: Awinic AW8898 mono amplifier on
+ * blsp_i2c6, driven over Quinary MI2S.
+ *
+ * Applied by drivers/misc/fp3_module_slot.c when 0x34 acknowledges on
+ * the speaker slot's bus.
+ *
+ * The AW8898 takes an active-low reset on GPIO 21 — the same pin the
+ * Fairphone 3+ TAS2557 uses as an active-high shutdown.
+ */
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+&i2c_6 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	fp3_speaker_amp: audio-amplifier@34 {
+		compatible = "awinic,aw8898";
+		reg = <0x34>;
+
+		reset-gpios = <&tlmm 21 GPIO_ACTIVE_LOW>;
+		interrupts-extended = <&tlmm 20 IRQ_TYPE_LEVEL_HIGH>;
+
+		dvdd-supply = <&pm8953_l5>;
+		vddio-supply = <&pm8953_l5>;
+		vdd-supply = <&vph_pwr>;
+
+		#sound-dai-cells = <0>;
+	};
+};
+
+&sound_card {
+	model = "Fairphone 3";
+	status = "okay";
+};
+
+/*
+ * The link itself is declared in the base device tree so that it keeps its
+ * position after the MultiMedia links — see the comment there. Only the
+ * codec depends on which loudspeaker module is fitted.
+ */
+&fp3_quinary_link {
+	codec {
+		sound-dai = <&fp3_speaker_amp>;
+	};
+};
