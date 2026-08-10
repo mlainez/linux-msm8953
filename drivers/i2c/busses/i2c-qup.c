@@ -1962,12 +1962,34 @@ static void qup_i2c_remove(struct platform_device *pdev)
 	pm_runtime_set_suspended(qup->dev);
 }
 
+/*
+ * On MSM8953/SDM632 the modem firmware writes TLMM registers directly,
+ * behind pinctrl's back: on the Fairphone 3 it remuxes GPIO 22/23 (the
+ * i2c-6 SDA/SCL pair, and with them the speaker amplifier) from
+ * blsp_i2c6 to plain GPIO, output, driving low.  Both lines pinned down
+ * is a bus error rather than a NAK, so transfers come back -EIO and the
+ * controller has no way to recover: i2c-qup has no bus_recovery_info,
+ * and toggling a pin the modem owns would not help anyway.
+ *
+ * Reclaiming the pins is the only fix, but simply asking for the
+ * default state does nothing.  pinctrl_select_state() returns early
+ * when the requested state is the one already selected, and as far as
+ * pinctrl is concerned the default state never stopped being applied:
+ * it never saw the modem's writes.  Alternating between the two states
+ * across the runtime PM cycle is what forces the mux, bias and drive
+ * strength to be written to hardware again, so the pins are known-good
+ * before the first transfer after every idle period.
+ *
+ * This works because the sleep state stays on the I2C function; see the
+ * i2c_6_sleep override in sdm632-fairphone-fp3.dts.
+ */
 static int qup_i2c_pm_suspend_runtime(struct device *device)
 {
 	struct qup_i2c_dev *qup = dev_get_drvdata(device);
 
 	dev_dbg(device, "pm_runtime: suspending...\n");
 	qup_i2c_disable_clocks(qup);
+	pinctrl_pm_select_sleep_state(device);
 	return 0;
 }
 
@@ -1976,7 +1998,7 @@ static int qup_i2c_pm_resume_runtime(struct device *device)
 	struct qup_i2c_dev *qup = dev_get_drvdata(device);
 
 	dev_dbg(device, "pm_runtime: resuming...\n");
-	pinctrl_select_default_state(device);
+	pinctrl_pm_select_default_state(device);
 	qup_i2c_enable_clocks(qup);
 	return 0;
 }
