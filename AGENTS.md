@@ -140,6 +140,18 @@ rebuilt. `rc`/`release` never receive unvalidated work.
   you a stale kernel without saying so (§4). Check `md5sum` of
   `images/Image` against the tree you just built, and confirm a string you
   just added is present in `vmlinux`.
+- **A diagnostic can be the fault.** `i2cprobe <bus> scan` walks 0x08-0x77
+  with SMBus-quick writes; on blsp_i2c6 that wedges whichever loudspeaker
+  amplifier is fitted, and it then fails every register access with -EIO
+  until the next reboot. An entire "the amp only works in the first ~60
+  seconds" theory came out of that, and it was wrong. Do not sweep a bus
+  that has a codec parked on it.
+- **The amplifiers do not answer at rest.** Both are parked in shutdown
+  after their firmware loads, so a userspace probe of 0x34 or 0x4c reads
+  as absent even on a perfectly healthy phone. The only valid test is a
+  real playback, judged by dmesg (`ret=0 rev=0xa0` versus `ret=-5`), not
+  by aplay's exit status — aplay reports success whenever the PCM opens,
+  including when the codec never unmutes and nothing is audible.
 - **Judge by evidence, not by absence of errors.** A slot that reports
   "no known module found" should be made to say *why*; the driver prints
   per-candidate results and a full bus scan with ID registers for exactly
