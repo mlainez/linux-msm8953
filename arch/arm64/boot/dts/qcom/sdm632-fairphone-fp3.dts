@@ -1,6 +1,25 @@
 // SPDX-License-Identifier: BSD-3-Clause
 /*
  * Copyright (c) 2022, Luca Weiss <luca@z3ntu.xyz>
+ * Copyright (c) 2026, Marc Lainez <marc.lainez@gmail.com>
+ *
+ * Device tree for the Fairphone 3 and Fairphone 3+.
+ *
+ * There is one mainboard.  Both models report qcom,msm-id = <349 0> and
+ * qcom,board-id = <8 0x10000>, and the parts that differ between them —
+ * the rear camera, the front camera and the loudspeaker — are sold as
+ * user-installable modules, so a given phone can carry any mix of the
+ * two generations:
+ *
+ *	slot		Fairphone 3		Fairphone 3+
+ *	rear camera	Sony IMX363		Samsung S5KGM1SP
+ *	front camera	Samsung S5K4H7YX	Samsung S5K3P9SP
+ *	loudspeaker	Awinic AW8898		TI TAS2557
+ *
+ * This file therefore describes the slots rather than their contents.
+ * drivers/misc/fp3_module_slot.c identifies what is fitted at boot and
+ * applies the matching device tree overlay, which is what brings up
+ * CAMSS and the sound card — both deliberately left disabled here.
  */
 /dts-v1/;
 
@@ -24,6 +43,43 @@
 
 	chosen {
 		stdout-path = "serial0:115200n8";
+	};
+
+	reserved-memory {
+		ramoops@bfe80000 {
+			compatible = "ramoops";
+			reg = <0x0 0xbfe80000 0x0 0x80000>;
+			console-size = <0x40000>;
+			record-size = <0x2000>;
+			pmsg-size = <0x0>;
+			ftrace-size = <0x0>;
+			dump-size = <0x3e000>;
+		};
+	};
+
+	battery: battery {
+		compatible = "simple-battery";
+		voltage-min-design-microvolt = <3400000>;
+		voltage-max-design-microvolt = <4390000>;
+		energy-full-design-microwatt-hours = <11400000>;
+		charge-full-design-microamp-hours = <3000000>;
+
+		ocv-capacity-celsius = <25>;
+		ocv-capacity-table-0 = <4370000 100>, <4337400 98>, <4307400 96>,
+			<4280600 94>, <4256600 92>, <4233100 90>, <4209700 88>,
+			<4186700 86>, <4164000 84>, <4141700 82>, <4120000 80>,
+			<4099000 78>, <4078600 76>, <4058700 74>, <4039300 72>,
+			<4021400 70>, <4006000 68>, <3990500 66>, <3971300 64>,
+			<3949500 62>, <3927700 60>, <3905200 58>, <3884600 56>,
+			<3868200 54>, <3854000 52>, <3841600 50>, <3830500 48>,
+			<3820400 46>, <3811100 44>, <3802400 42>, <3795100 40>,
+			<3788600 38>, <3783000 36>, <3778200 34>, <3774000 32>,
+			<3769900 30>, <3765800 28>, <3761300 26>, <3755300 24>,
+			<3748200 22>, <3739400 20>, <3728100 18>, <3715600 16>,
+			<3701200 14>, <3686100 12>, <3680100 10>, <3678200 9>,
+			<3676900 8>, <3673600 7>, <3667900 6>, <3650200 5>,
+			<3610600 4>, <3555200 3>, <3481300 2>, <3374500 1>,
+			<3193600 0>;
 	};
 
 	gpio-keys {
@@ -59,7 +115,8 @@
 		regulator-max-microvolt = <1800000>;
 		gpio = <&tlmm 130 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
-		startup-delay-us = <200>;
+		startup-delay-us = <10000>;
+		regulator-always-on;
 	};
 
 	/* Rear camera AF actuator supply, active-high enable on GPIO 128 */
@@ -70,7 +127,7 @@
 		regulator-max-microvolt = <2850000>;
 		gpio = <&tlmm 128 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
-		startup-delay-us = <200>;
+		startup-delay-us = <10000>;
 	};
 
 	/* Front camera DVDD, active-high enable on GPIO 46 */
@@ -84,29 +141,55 @@
 		startup-delay-us = <200>;
 	};
 
-	battery: battery {
-		compatible = "simple-battery";
-		voltage-min-design-microvolt = <3400000>;
-		voltage-max-design-microvolt = <4390000>;
-		energy-full-design-microwatt-hours = <11400000>;
-		charge-full-design-microamp-hours = <3000000>;
+	/*
+	 * The swappable modules.  Each slot lists only what is soldered to
+	 * the mainboard — the bus the module hangs off, its rails, its
+	 * reference clock and its enable line.  What is plugged in is
+	 * worked out at boot; see drivers/misc/fp3_module_slot.c.
+	 *
+	 * enable-gpios is declared active-high so the slot driver works in
+	 * raw levels: every module runs with its pin physically high, but
+	 * the bindings disagree about how to say so — the camera sensors
+	 * and the AW8898 call it an active-low reset, the TAS2557 calls the
+	 * very same pin an active-high shutdown.
+	 */
+	module-slots {
+		compatible = "fairphone,fp3-module-slots";
 
-		ocv-capacity-celsius = <25>;
-		ocv-capacity-table-0 = <4370000 100>, <4337400 98>, <4307400 96>,
-			<4280600 94>, <4256600 92>, <4233100 90>, <4209700 88>,
-			<4186700 86>, <4164000 84>, <4141700 82>, <4120000 80>,
-			<4099000 78>, <4078600 76>, <4058700 74>, <4039300 72>,
-			<4021400 70>, <4006000 68>, <3990500 66>, <3971300 64>,
-			<3949500 62>, <3927700 60>, <3905200 58>, <3884600 56>,
-			<3868200 54>, <3854000 52>, <3841600 50>, <3830500 48>,
-			<3820400 46>, <3811100 44>, <3802400 42>, <3795100 40>,
-			<3788600 38>, <3783000 36>, <3778200 34>, <3774000 32>,
-			<3769900 30>, <3765800 28>, <3761300 26>, <3755300 24>,
-			<3748200 22>, <3739400 20>, <3728100 18>, <3715600 16>,
-			<3701200 14>, <3686100 12>, <3680100 10>, <3678200 9>,
-			<3676900 8>, <3673600 7>, <3667900 6>, <3650200 5>,
-			<3610600 4>, <3555200 3>, <3481300 2>, <3374500 1>,
-			<3193600 0>;
+		slot-rear-camera {
+			fairphone,slot = "rear-camera";
+			i2c-bus = <&cci_i2c0>;
+
+			clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
+			enable-gpios = <&tlmm 40 GPIO_ACTIVE_HIGH>;
+
+			vana-supply = <&pm8953_l22>;
+			vdig-supply = <&pm8953_l2>;
+			vif-supply = <&cam_vio>;
+		};
+
+		slot-front-camera {
+			fairphone,slot = "front-camera";
+			i2c-bus = <&cci_i2c1>;
+
+			clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
+			enable-gpios = <&tlmm 129 GPIO_ACTIVE_HIGH>;
+
+			vana-supply = <&pm8953_l22>;
+			vdig-supply = <&cam_vdig_front>;
+			vif-supply = <&cam_vio>;
+		};
+
+		slot-speaker-amp {
+			fairphone,slot = "speaker-amp";
+			i2c-bus = <&i2c_6>;
+
+			enable-gpios = <&tlmm 21 GPIO_ACTIVE_HIGH>;
+
+			dvdd-supply = <&pm8953_l5>;
+			vddio-supply = <&pm8953_l5>;
+			vdd-supply = <&vph_pwr>;
+		};
 	};
 };
 
@@ -156,23 +239,22 @@
 };
 
 &i2c_6 {
+	/*
+	 * The amplifier node itself comes from the speaker slot overlay, but
+	 * the bus properties have to be here: the slot driver talks to this
+	 * bus to work out which amplifier is fitted, long before any overlay
+	 * is applied.
+	 */
 	status = "okay";
+	clock-frequency = <400000>;
+};
 
-	aw8898: audio-amplifier@34 {
-		compatible = "awinic,aw8898";
-		reg = <0x34>;
-
-		reset-gpios = <&tlmm 21 GPIO_ACTIVE_LOW>;
-		interrupts-extended = <&tlmm 20 IRQ_TYPE_LEVEL_HIGH>;
-
-		dvdd-supply = <&pm8953_l5>;
-		vddio-supply = <&pm8953_l5>;
-		vdd-supply = <&vph_pwr>;
-
-		#sound-dai-cells = <0>;
-	};
-
-	/* Fairphone 3+ only: Speaker amp TAS2557 @ 4c */
+/*
+ * Keep blsp_i2c6 muxed to the I2C function while asleep.  Letting the pins
+ * fall back to GPIO mode kills communication with the TAS2557.
+ */
+&i2c_6_sleep {
+	function = "blsp_i2c6";
 };
 
 &lpass {
@@ -231,30 +313,6 @@
 &pm8953_resin {
 	linux,code = <KEY_VOLUMEDOWN>;
 	status = "okay";
-};
-
-&pmi632_flash {
-	status = "okay";
-
-	led-0 {
-		function = LED_FUNCTION_FLASH;
-		color = <LED_COLOR_ID_WHITE>;
-		led-sources = <1>;
-		led-max-microamp = <300000>;
-		flash-max-microamp = <1500000>;
-		flash-max-timeout-us = <1280000>;
-		function-enumerator = <0>;
-	};
-
-	led-1 {
-		function = LED_FUNCTION_FLASH;
-		color = <LED_COLOR_ID_WHITE>;
-		led-sources = <2>;
-		led-max-microamp = <300000>;
-		flash-max-microamp = <1500000>;
-		flash-max-timeout-us = <1280000>;
-		function-enumerator = <1>;
-	};
 };
 
 &pmi632_lpg {
@@ -362,26 +420,42 @@
 };
 
 &sound_card {
-	model = "Fairphone 3";
-
 	pinctrl-0 = <&quin_mi2s_active>, <&quin_mi2s_ws_active>;
 	pinctrl-1 = <&quin_mi2s_sleep>, <&quin_mi2s_ws_sleep>;
 	pinctrl-names = "default",
 			"sleep";
 
-	status = "okay";
+	/*
+	 * Left disabled until a loudspeaker module has been identified; the
+	 * speaker slot overlay supplies the codec and flips the status, so
+	 * the card never probes against an amplifier that is not there.
+	 */
 
-	/* FP3 does not use the codec on PM8953 */
+	/* Neither model uses the codec on PM8953. */
 	/delete-property/ audio-routing;
 	/delete-node/ primary-mi2s-dai-link;
 	/delete-node/ tertiary-mi2s-dai-link;
 
-	quinary-mi2s-dai-link {
+	/*
+	 * This link has to be declared here, after the MultiMedia links it
+	 * shares a card with, and only its codec may come from an overlay.
+	 *
+	 * Every DAI link names q6routing as its platform, so q6routing's
+	 * component — and with it the 528 DAPM routes referencing
+	 * MM_DL1..8 — is probed alongside whichever link comes first. Those
+	 * MM_DL widgets belong to q6asm, the CPU side of the MultiMedia
+	 * links, so a MultiMedia link must be probed first or every one of
+	 * those routes fails to resolve. Since ASoC dropped
+	 * disable_route_checks (dd2395162c07) a failed component route is
+	 * fatal and the card aborts with -ENODEV.
+	 *
+	 * of_changeset attaches overlay nodes at the *head* of the parent's
+	 * child list, so a link contributed by an overlay always sorts
+	 * first and drags q6routing ahead of q6asm. Declaring the node here
+	 * pins its position; the overlay fills in the codec only.
+	 */
+	fp3_quinary_link: quinary-mi2s-dai-link {
 		link-name = "Quinary MI2S";
-
-		codec {
-			sound-dai = <&aw8898>;
-		};
 
 		cpu {
 			sound-dai = <&q6afedai QUINARY_MI2S_RX>;
@@ -578,33 +652,18 @@
 	vdddig-supply = <&pm8953_l5>;
 };
 
-/* Camera subsystem */
+/* Camera subsystem — see module-slots above */
 
 &camss {
 	vdda-supply = <&pm8953_s3>;
-	status = "okay";
 
-	ports {
-		/* CSIPHY0 → rear camera (IMX363), 4 lanes */
-		port@0 {
-			reg = <0>;
-			csiphy0_ep: endpoint {
-				clock-lanes = <7>;
-				data-lanes = <0 1 2 3>;
-				remote-endpoint = <&rear_cam_ep>;
-			};
-		};
-
-		/* CSIPHY2 → front camera (S5K4H7YX), 4 lanes */
-		port@2 {
-			reg = <2>;
-			csiphy2_ep: endpoint {
-				clock-lanes = <7>;
-				data-lanes = <0 1 2 3>;
-				remote-endpoint = <&front_cam_ep>;
-			};
-		};
-	};
+	/*
+	 * Left disabled, and with no ports. camss_of_parse_ports() waits on
+	 * every endpoint's remote subdev, so an endpoint whose sensor is not
+	 * fitted would stall the notifier and kill the other camera too.
+	 * Each camera slot overlay contributes its own port; the last one
+	 * enables CAMSS.
+	 */
 };
 
 &cci {
@@ -617,70 +676,3 @@
 	status = "okay";
 };
 
-&cci_i2c0 {
-	/* Sony IMX363 — 12MP rear camera */
-	camera-sensor@1a {
-		compatible = "sony,imx363";
-		reg = <0x1a>;
-
-		clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
-		clock-frequency = <24000000>;
-
-		reset-gpios = <&tlmm 40 GPIO_ACTIVE_LOW>;
-
-		vana-supply = <&pm8953_l22>;
-		vdig-supply = <&pm8953_l2>;
-		vif-supply = <&cam_vio>;
-
-		rotation = <270>;
-		orientation = <1>;
-
-		flash-leds = <&pmi632_flash>;
-		lens-focus = <&actuator>;
-
-		port {
-			rear_cam_ep: endpoint {
-				data-lanes = <0 1 2 3>;
-				link-frequencies = /bits/ 64 <620000000 350000000 510000000>;
-				remote-endpoint = <&csiphy0_ep>;
-			};
-		};
-	};
-
-	/* AK7374 voice coil motor — rear camera autofocus */
-	actuator: camera-lens@18 {
-		compatible = "asahi-kasei,ak7374";
-		reg = <0x18>;
-
-		vdd-supply = <&cam_vaf>;
-		vio-supply = <&cam_vio>;
-	};
-};
-
-&cci_i2c1 {
-	/* Samsung S5K4H7YX — 8MP front camera */
-	camera-sensor@10 {
-		compatible = "samsung,s5k4h7yx";
-		reg = <0x10>;
-
-		clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
-		clock-frequency = <24000000>;
-
-		reset-gpios = <&tlmm 129 GPIO_ACTIVE_LOW>;
-
-		vana-supply = <&pm8953_l22>;
-		vdig-supply = <&cam_vdig_front>;
-		vif-supply = <&cam_vio>;
-
-		rotation = <270>;
-		orientation = <0>;
-
-		port {
-			front_cam_ep: endpoint {
-				data-lanes = <0 1 2 3>;
-				link-frequencies = /bits/ 64 <350000000>;
-				remote-endpoint = <&csiphy2_ep>;
-			};
-		};
-	};
-};

@@ -620,6 +620,25 @@ config MARVELL_CN10K_DPI
 	  To compile this driver as a module, choose M here: the module
 	  will be called mrvl_cn10k_dpi.
 
+config FP3_MODULE_SLOTS
+	bool "Fairphone 3/3+ swappable module detection"
+	depends on ARCH_QCOM || COMPILE_TEST
+	depends on I2C=y
+	depends on OF_OVERLAY
+	help
+	  The Fairphone 3's rear camera, front camera and loudspeaker are
+	  user-replaceable, and the Fairphone 3+ upgrade kit fits different
+	  silicon in each. Both variants share one mainboard and report
+	  identical board IDs, so they cannot be told apart before boot, and
+	  a phone may carry any mix of old and new modules.
+
+	  Say Y to describe only the slots in the device tree and let the
+	  kernel identify what is plugged into each of them at boot,
+	  applying a device tree overlay for whichever chip it finds. The
+	  stock sensor and codec drivers then bind normally.
+
+	  If unsure, say N.
+
 config MCHP_LAN966X_PCI
 	tristate "Microchip LAN966x PCIe Support"
 	depends on PCI
