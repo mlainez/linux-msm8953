@@ -390,7 +390,12 @@ int q6routing_stream_open(int fedai_id, int perf_mode,
 	session->bits_per_sample = pdata->bits_per_sample;
 
 	payload.num_copps = 0; /* only RX needs to use payload */
-	topology = NULL_COPP_TOPOLOGY;
+	/*
+	 * The downstream stack opens COPPs with the default topology; the
+	 * NULL topology bypasses the postprocessing chain the ADSP expects
+	 * for SLIMbus playback and yields silence on the earpiece path.
+	 */
+	topology = DEFAULT_COPP_TOPOLOGY;
 	copp = q6adm_open(routing_data->dev, session->port_id,
 			      session->path_type, session->sample_rate,
 			      session->channels, topology, perf_mode,

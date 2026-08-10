@@ -209,4 +209,20 @@ int slim_stream_disable(struct slim_stream_runtime *stream);
 int slim_stream_unprepare(struct slim_stream_runtime *stream);
 int slim_stream_free(struct slim_stream_runtime *stream);
 
+/*
+ * Manager-side (AP) port allocation. Controllers that own physical
+ * data pipes between the AP and the bus master expose them via the
+ * optional ->alloc_port / ->dealloc_port callbacks; controllers that
+ * don't will return -EOPNOTSUPP and existing slave-only drivers see
+ * no change.
+ *
+ * On success ports[i] is filled with the manager-side SLIMbus port
+ * number ("port_b" in Qualcomm parlance) that the codec should pair
+ * with channel chans[i] when activating a stream.
+ */
+int slim_alloc_mgrports(struct slim_device *sb, unsigned int nports,
+			u8 *ports);
+int slim_dealloc_mgrports(struct slim_device *sb, unsigned int nports,
+			  u8 *ports);
+
 #endif /* _LINUX_SLIMBUS_H */

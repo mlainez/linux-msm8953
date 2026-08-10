@@ -6,6 +6,7 @@
 #define ADM_PATH_LIVE_REC	0x2
 #define MAX_COPPS_PER_PORT	8
 #define NULL_COPP_TOPOLOGY	0x00010312
+#define DEFAULT_COPP_TOPOLOGY	0x00010314
 
 /* multiple copp per stream. */
 struct route_payload {

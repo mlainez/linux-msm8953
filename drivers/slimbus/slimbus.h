@@ -420,6 +420,18 @@ struct slim_controller {
 	int		(*enable_stream)(struct slim_stream_runtime *rt);
 	int		(*disable_stream)(struct slim_stream_runtime *rt);
 	int			(*wakeup)(struct slim_controller *ctrl);
+	/*
+	 * Optional callbacks for controllers that own physical AP-side
+	 * (manager) data ports. Drivers that don't implement these leave
+	 * the pointers NULL and slim_alloc_mgrports / slim_dealloc_mgrports
+	 * return -EOPNOTSUPP.
+	 *
+	 * alloc_port: allocate the next free manager-side data port and
+	 *   write its hardware port number ("port_b") to *port_out.
+	 * dealloc_port: release the manager-side port identified by port_b.
+	 */
+	int		(*alloc_port)(struct slim_controller *ctrl, u8 *port_out);
+	int		(*dealloc_port)(struct slim_controller *ctrl, u8 port_b);
 };
 
 int slim_device_report_present(struct slim_controller *ctrl,

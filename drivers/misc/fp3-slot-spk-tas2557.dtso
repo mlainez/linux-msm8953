@@ -38,10 +38,6 @@
 &sound_card {
 	model = "Fairphone 3+";
 	status = "okay";
-
-	audio-routing = "Speaker", "OUT";
-	widgets = "Speaker", "Speaker";
-	pin-switches = "Speaker";
 };
 
 /*

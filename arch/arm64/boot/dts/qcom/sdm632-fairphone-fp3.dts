@@ -24,6 +24,8 @@
 /dts-v1/;
 
 #include <dt-bindings/leds/common.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/sound/qcom,wcd9335.h>
 #include "sdm632.dtsi"
 #include "pm8953.dtsi"
 #include "pmi632.dtsi"
@@ -141,6 +143,35 @@
 		startup-delay-us = <200>;
 	};
 
+	divclk2_codec: divclk2 {
+		compatible = "gpio-gate-clock";
+		clocks = <&rpmcc RPM_SMD_DIV_CLK2>;
+		#clock-cells = <0>;
+		enable-gpios = <&pm8953_gpios 1 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&tasha_mclk_default>;
+	};
+
+	/*
+	 * External LDO feeding the WCD9335 SIDO buck input plus vdd-tx-h /
+	 * vdd-rx-h / vdd-px (1.8 V, up to 650 mA combined), matching
+	 * downstream's eldo2_8953. Taking vdd-buck from pm8953_l5 instead
+	 * leaves the SIDO unable to start on its 5 mA budget, and the analog
+	 * block then silently refuses writes and reads back zero.
+	 */
+	eldo2_8953: regulator-eldo2-8953 {
+		compatible = "regulator-fixed";
+		regulator-name = "eldo2_8953";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 50 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+		regulator-boot-on;
+		pinctrl-names = "default";
+		pinctrl-0 = <&codec_eldo2_en>;
+	};
+
 	/*
 	 * The swappable modules.  Each slot lists only what is soldered to
 	 * the mainboard — the bus the module hangs off, its rails, its
@@ -255,6 +286,66 @@
  */
 &i2c_6_sleep {
 	function = "blsp_i2c6";
+};
+
+&slim_msm {
+	status = "okay";
+
+	slim@1 {
+		reg = <1>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		tasha_ifd: tas-ifd@0,0 {
+			compatible = "slim217,1a0";
+			reg = <0 0>;
+		};
+
+		wcd9335: codec@1,0 {
+			compatible = "slim217,1a0";
+			reg = <1 0>;
+
+			clock-names = "mclk", "slimbus";
+			clocks = <&divclk2_codec>,
+				 <&rpmcc RPM_SMD_BB_CLK1>;
+
+			interrupt-parent = <&tlmm>;
+			interrupts = <73 IRQ_TYPE_LEVEL_HIGH>,
+				     <73 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "intr1", "intr2";
+			interrupt-controller;
+			#interrupt-cells = <1>;
+
+			pinctrl-0 = <&wcd_reset_active &wcd_intr_default>;
+			pinctrl-names = "default";
+
+			reset-gpios = <&tlmm 67 GPIO_ACTIVE_LOW>;
+			slim-ifc-dev = <&tasha_ifd>;
+
+			#sound-dai-cells = <1>;
+
+			vdd-buck-supply = <&eldo2_8953>;
+			vdd-buck-sido-supply = <&eldo2_8953>;
+			vdd-rx-supply = <&eldo2_8953>;
+			vdd-tx-supply = <&eldo2_8953>;
+			vdd-io-supply = <&pm8953_l5>;
+			vdd-vbat-supply = <&vph_pwr>;
+			vdd-micbias-supply = <&pm8953_l13>;
+		};
+	};
+};
+
+/*
+ * The LPASS internal digital codec defaults to okay in msm8953.dtsi, but
+ * neither Fairphone 3 model uses it: audio goes out over SLIMbus to the
+ * WCD9335 and over Quinary MI2S to the loudspeaker amplifier. Probing it
+ * does clk_prepare_enable(mclk), which sends an AFE_SVC_CMD_SET_PARAM for
+ * LPASS_CLK_ID_INTERNAL_DIGITAL_CODEC_CORE; the ADSP acks and then throws
+ * "Excep:0:Exception detected" about two seconds later, leaving the
+ * slim-NGD MCAP handshake permanently stuck.
+ */
+&lpass_codec {
+	status = "disabled";
 };
 
 &lpass {
@@ -431,10 +522,29 @@
 	 * the card never probes against an amplifier that is not there.
 	 */
 
-	/* Neither model uses the codec on PM8953. */
+	/*
+	 * Only widgets that are certain to be present may appear here: since
+	 * dd2395162c07 ("ASoC: remove disable_route_checks") a route naming a
+	 * missing widget aborts the entire card. Both loudspeaker amplifiers
+	 * expose "OUT", so this list is valid whichever one is fitted. The
+	 * WCD9335 routes join it once that codec enumerates.
+	 */
 	/delete-property/ audio-routing;
+	audio-routing = "Speaker", "OUT";
+	widgets = "Speaker", "Speaker";
+	pin-switches = "Speaker";
+
 	/delete-node/ primary-mi2s-dai-link;
 	/delete-node/ tertiary-mi2s-dai-link;
+
+	/*
+	 * No SLIM DAI link yet. The WCD9335 is described below and its driver
+	 * loads, but the NGD satellite handshake still fails ("ADDR_QUERY:
+	 * ADSP returned failed EA"), so the codec never enumerates. A link
+	 * naming it would park the card in deferred probe for ever and take
+	 * the loudspeaker with it, so earpiece playback stays out of tree
+	 * until enumeration works.
+	 */
 
 	/*
 	 * This link has to be declared here, after the MultiMedia links it
@@ -586,6 +696,28 @@
 	 */
 	gpio-reserved-ranges = <0 4>, <135 4>;
 
+	wcd_reset_active: wcd-reset-active-state {
+		pins = "gpio67";
+		function = "gpio";
+		drive-strength = <16>;
+		output-high;
+	};
+
+	wcd_intr_default: wcd-intr-default-state {
+		pins = "gpio73";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	codec_eldo2_en: codec-eldo2-en-state {
+		pins = "gpio50";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-high;
+	};
+
 	mdss_te_default: mdss-te-default-state {
 		pins = "gpio24";
 		function = "mdp_vsync";
@@ -676,3 +808,12 @@
 	status = "okay";
 };
 
+&pm8953_gpios {
+	tasha_mclk_default: tasha-mclk-default-state {
+		pins = "gpio1";
+		function = "func1";
+		bias-disable;
+		power-source = <0>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+	};
+};

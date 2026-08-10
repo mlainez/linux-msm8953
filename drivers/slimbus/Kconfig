@@ -27,4 +27,15 @@ config SLIM_QCOM_NGD_CTRL
 	  communicating with slave HW directly over the bus using messaging
 	  interface, and communicating with master component residing on ADSP
 	  for bandwidth and data-channel management.
+
+config SLIM_QCOM_NGD_CTRL_MSM8953
+	tristate "Qualcomm MSM8953/SDM632 SLIMbus NGD satellite controller"
+	depends on HAS_IOMEM && NET
+	depends on QCOM_RPROC_COMMON || (COMPILE_TEST && !QCOM_RPROC_COMMON)
+	depends on ARCH_QCOM || COMPILE_TEST
+	select QCOM_QMI_HELPERS
+	help
+	  SLIMbus NGD satellite controller for MSM8953/SDM632 SoCs.
+	  Uses AHB register-based I/O matching the downstream driver
+	  behavior for the ADSP-managed SLIMbus master.
 endif
