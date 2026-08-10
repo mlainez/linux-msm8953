@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Bring up CAMSS once the camera slots have been resolved.
+ *
+ * CAMSS is left disabled in the base device tree because
+ * camss_of_parse_ports() registers every endpoint's remote with the
+ * v4l2-async notifier and waits for all of them: an endpoint whose
+ * sensor is not fitted would stall the notifier and take the *other*
+ * camera down with it.  Each camera overlay contributes only its own
+ * port, so by the time this overlay flips the status every endpoint that
+ * exists has a sensor behind it — including on a phone where only one of
+ * the two modules is present.
+ *
+ * of_reconfig_get_state_change() turns a disabled -> okay status update
+ * into OF_RECONFIG_CHANGE_ADD, which is what creates the platform device
+ * and makes CAMSS probe here rather than at boot.
+ */
+/dts-v1/;
+/plugin/;
+
+&camss {
+	status = "okay";
+};
