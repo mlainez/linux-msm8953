@@ -373,29 +373,6 @@
 	status = "okay";
 };
 
-&pmi632_adc {
-	channel@4a {
-		reg = <ADC5_BAT_THERM_100K_PU>;
-		qcom,hw-settle-time = <200>;
-		qcom,pre-scaling = <1 1>;
-		qcom,ratiometric;
-		label = "batt_therm";
-	};
-};
-
-&pmi632_qg {
-	monitored-battery = <&battery>;
-	power-supplies = <&pmi632_charger>;
-	io-channels = <&pmi632_adc ADC5_BAT_THERM_100K_PU>;
-	io-channel-names = "batt-therm";
-	status = "okay";
-};
-
-&pmi632_charger {
-	monitored-battery = <&battery>;
-	status = "okay";
-};
-
 &q6afedai {
 	dai@127 {
 		reg = <QUINARY_MI2S_RX>;
