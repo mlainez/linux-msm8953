@@ -315,6 +315,38 @@
 	status = "okay";
 };
 
+/*
+ * The flash LED controller is a PMI632 block, i.e. mainboard hardware, so it
+ * belongs here and not in a camera overlay. Enabling it from an overlay does
+ * not work anyway: of_platform_notify() resolves a new device's parent with
+ * of_find_device_by_node(), which only matches platform devices, so a node
+ * whose parent is the SPMI PMIC is created with no parent at all and
+ * leds-qcom-flash then fails dev_get_regmap(dev->parent) with -EINVAL.
+ */
+&pmi632_flash {
+	status = "okay";
+
+	led-0 {
+		function = LED_FUNCTION_FLASH;
+		color = <LED_COLOR_ID_WHITE>;
+		led-sources = <1>;
+		led-max-microamp = <300000>;
+		flash-max-microamp = <1500000>;
+		flash-max-timeout-us = <1280000>;
+		function-enumerator = <0>;
+	};
+
+	led-1 {
+		function = LED_FUNCTION_FLASH;
+		color = <LED_COLOR_ID_WHITE>;
+		led-sources = <2>;
+		led-max-microamp = <300000>;
+		flash-max-microamp = <1500000>;
+		flash-max-timeout-us = <1280000>;
+		function-enumerator = <1>;
+	};
+};
+
 &pmi632_lpg {
 	status = "okay";
 
