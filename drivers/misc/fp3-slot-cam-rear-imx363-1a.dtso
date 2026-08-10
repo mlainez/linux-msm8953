@@ -36,7 +36,7 @@
 		rotation = <270>;
 		orientation = <1>;
 
-		flash-leds = <&pmi632_flash>;
+		flash-leds = <&fp3_flash_led0>, <&fp3_flash_led1>;
 		lens-focus = <&fp3_rear_actuator>;
 
 		port {
