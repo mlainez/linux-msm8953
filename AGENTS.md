@@ -152,6 +152,22 @@ rebuilt. `rc`/`release` never receive unvalidated work.
   real playback, judged by dmesg (`ret=0 rev=0xa0` versus `ret=-5`), not
   by aplay's exit status — aplay reports success whenever the PCM opens,
   including when the codec never unmutes and nothing is audible.
+- **The software pinmux view lies; read the registers.**
+  `/sys/kernel/debug/pinctrl/*/pinmux-pins` reports what Linux *believes*
+  it muxed, and the modem programs TLMM behind pinctrl's back. Only
+  `/sys/kernel/debug/gpio` (`msm_gpio_dbg_show`) reads the hardware:
+  `func0 out low pull down` on gpio22/23 means the modem has taken i2c-6,
+  and every transfer on that bus then fails as a bus error (`-EIO`, never
+  `-ENXIO`) no matter which amplifier is fitted. Chasing that as a codec
+  bug cost a rebind experiment and an upstream diff before anyone read the
+  register. `CONFIG_DYNAMIC_DEBUG=y` and the `pinmux-select` debugfs file
+  (`echo "gpio22 blsp_i2c6" > …/pinmux-select`) settle a pinctrl theory on
+  a running phone instead of one flash cycle per guess.
+- **Never stop the modem remoteproc.** `echo stop >
+  /sys/class/remoteproc/remoteproc1/state` on the MSS hangs the write and
+  wedges the phone hard enough to need a physical power cycle. The USB
+  gadget keeps answering neighbour discovery, so the phone looks alive
+  while SSH is already gone. There is no remote recovery.
 - **Judge by evidence, not by absence of errors.** A slot that reports
   "no known module found" should be made to say *why*; the driver prints
   per-candidate results and a full bus scan with ID registers for exactly
