@@ -39,7 +39,7 @@
 		port {
 			fp3_front_cam_ep: endpoint {
 				data-lanes = <0 1 2 3>;
-				link-frequencies = /bits/ 64 <400000000 384000000>;
+				link-frequencies = /bits/ 64 <732000000 384000000>;
 				remote-endpoint = <&fp3_csiphy2_ep>;
 			};
 		};
