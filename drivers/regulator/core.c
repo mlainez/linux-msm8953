@@ -2844,6 +2844,23 @@ static void regulator_ena_gpio_free(struct regulator_dev *rdev)
  *
  * Return: 0 on success or a negative error number on failure.
  */
+/*
+ * Drive the enable GPIO with gpiod_direction_output() rather than
+ * gpiod_set_value(), so that the output-enable is re-asserted every time
+ * rather than only once when the descriptor was requested.
+ *
+ * _regulator_is_enabled() reports ena_gpio_state, which is software
+ * bookkeeping, so the core cannot notice if something reprogrammed the
+ * pin behind its back. On MSM8953 the modem firmware writes TLMM
+ * registers directly and clears the output-enable on the pins of QDSS
+ * trace bus B; a GPIO-switched rail on one of those pins then reads as
+ * enabled while its pin has quietly become an undriven input, and the
+ * regulator is off in hardware with nothing to say so.
+ *
+ * gpiod_direction_output() keeps the logical-value and open-drain
+ * semantics of the value-only call for every other user; it only adds
+ * the direction write. Sleeping is already allowed here.
+ */
 static int regulator_ena_gpio_ctrl(struct regulator_dev *rdev, bool enable)
 {
 	struct regulator_enable_gpio *pin = rdev->ena_pin;
@@ -2855,7 +2872,7 @@ static int regulator_ena_gpio_ctrl(struct regulator_dev *rdev, bool enable)
 	if (enable) {
 		/* Enable GPIO at initial use */
 		if (pin->enable_count == 0) {
-			ret = gpiod_set_value_cansleep(pin->gpiod, 1);
+			ret = gpiod_direction_output(pin->gpiod, 1);
 			if (ret)
 				return ret;
 		}
@@ -2869,7 +2886,7 @@ static int regulator_ena_gpio_ctrl(struct regulator_dev *rdev, bool enable)
 
 		/* Disable GPIO if not used */
 		if (pin->enable_count <= 1) {
-			ret = gpiod_set_value_cansleep(pin->gpiod, 0);
+			ret = gpiod_direction_output(pin->gpiod, 0);
 			if (ret)
 				return ret;
 
