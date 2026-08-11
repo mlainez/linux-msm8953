@@ -163,6 +163,24 @@ rebuilt. `rc`/`release` never receive unvalidated work.
   register. `CONFIG_DYNAMIC_DEBUG=y` and the `pinmux-select` debugfs file
   (`echo "gpio22 blsp_i2c6" > …/pinmux-select`) settle a pinctrl theory on
   a running phone instead of one flash cycle per guess.
+- **The modem clobbers QDSS trace bus B, and software state lies about it.**
+  The modem firmware writes TLMM directly. Every pin it has been caught
+  reprogramming is a member of `qdss_traceclk_b` / `qdss_tracedata_b`:
+  gpio22 and gpio23 (i2c-6, which kills the loudspeaker) and gpio46 (the
+  front camera's 1.2 V rail). The full list is in
+  `pinctrl-msm8953.c:1293`; gpio8, 9, 12, 13, 42-45, 47, 66, 86, 87, 88
+  and 92 are also on it, so suspect them first when something works at
+  boot and never again.
+  What makes this expensive to debug is that the kernel's own bookkeeping
+  keeps saying everything is fine. `pinmux-pins` reports the mux pinctrl
+  *believes* it set. `regulator_summary` reports `ena_gpio_state`, a
+  software flag, so a GPIO-switched rail reads "enabled" while its pin
+  has been turned back into an input and the supply is dead. Only
+  `/sys/kernel/debug/gpio` reads the real TLMM register: `in low` on a
+  pin that should be driving is the tell. Two fixes now exist for this
+  family — the i2c-qup pinctrl re-commit and the regulator core
+  re-asserting the enable GPIO's direction — and both work by writing the
+  hardware again rather than trusting cached state.
 - **Never stop the modem remoteproc.** `echo stop >
   /sys/class/remoteproc/remoteproc1/state` on the MSS hangs the write and
   wedges the phone hard enough to need a physical power cycle. The USB
