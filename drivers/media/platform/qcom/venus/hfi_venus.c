@@ -1605,6 +1605,31 @@ static int venus_suspend_3xx(struct venus_core *core)
 		goto power_off;
 
 	/*
+	 * Do not try to collapse a core that still has work outstanding.
+	 *
+	 * The 1xx path checks this before powering off, and 3xx should too.
+	 * Nothing holds a runtime-PM reference for the duration of a
+	 * streaming session: venc_start_streaming() takes one and drops it
+	 * immediately with an autosuspend put, so a live session survives
+	 * only because each buf_done marks the device busy against a 2 s
+	 * autosuspend delay. Any two-second gap in buffer traffic — a slow
+	 * client, a firmware hiccup — therefore lets runtime PM attempt to
+	 * power-collapse a session that is still loaded, with buffers owned
+	 * by the firmware.
+	 *
+	 * Unlike 1xx, this path has no negotiation to fall back on: there is
+	 * no HFI_CMD_SYS_PC_PREP handshake before the idle poll, and
+	 * vcodec_control_v3() gates the clock and GDSC with no firmware
+	 * consent at all. So refuse early instead of polling hardware that
+	 * is legitimately busy.
+	 */
+	mutex_lock(&hdev->lock);
+	ret = venus_are_queues_empty(hdev);
+	mutex_unlock(&hdev->lock);
+	if (ret < 0 || !ret)
+		return -EBUSY;
+
+	/*
 	 * Power collapse sequence for Venus 3xx and 4xx versions:
 	 * 1. Check for ARM9 and video core to be idle by checking WFI bit
 	 *    (bit 0) in CPU status register and by checking Idle (bit 30) in
@@ -1615,8 +1640,24 @@ static int venus_suspend_3xx(struct venus_core *core)
 	ret = readx_poll_timeout(venus_cpu_and_video_core_idle, hdev, val, val,
 				 1500, 100 * 1500);
 	if (ret) {
-		dev_err(dev, "wait for cpu and video core idle fail (%d)\n", ret);
-		return ret;
+		/*
+		 * Report this as busy, not as a failure.
+		 *
+		 * The PM core latches any error other than -EAGAIN/-EBUSY into
+		 * dev->power.runtime_error, after which every rpm_resume() of
+		 * this device returns -EINVAL. That kills the encoder and the
+		 * decoder outright, and it also disables the recovery path:
+		 * venus_sys_error_handler() begins with pm_runtime_get_sync()
+		 * on the very device that can no longer resume, so it spins
+		 * rescheduling itself. Nothing short of unbind/rebind or a
+		 * reboot clears it.
+		 *
+		 * A core that is not idle right now is the definition of busy.
+		 * Returning -EBUSY lets runtime PM try again later, which is
+		 * both accurate and recoverable.
+		 */
+		dev_dbg(dev, VDBGL "cpu and video core not idle, deferring power collapse\n");
+		return -EBUSY;
 	}
 
 	ret = venus_prepare_power_collapse(hdev, false);
@@ -1628,7 +1669,7 @@ static int venus_suspend_3xx(struct venus_core *core)
 	ret = readx_poll_timeout(venus_cpu_idle_and_pc_ready, hdev, val, val,
 				 1500, 100 * 1500);
 	if (ret)
-		return ret;
+		return -EBUSY;	/* retriable; see above */
 
 power_off:
 	mutex_lock(&hdev->lock);
