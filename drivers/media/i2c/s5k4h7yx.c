@@ -27,6 +27,7 @@
 
 /* Chip ID */
 #define S5K4H7YX_REG_CHIP_ID CCI_REG16(0x0000)
+#define S5K4H7YX_REG_SOFTWARE_RESET CCI_REG8(0x0103)
 #define S5K4H7YX_CHIP_ID 0x487B
 
 /* Group hold */
@@ -678,6 +679,20 @@ static int s5k4h7yx_start_streaming(struct s5k4h7yx *s5k4h7yx)
 	struct i2c_client *client = v4l2_get_subdevdata(&s5k4h7yx->sd);
 	const struct s5k4h7yx_reg_list *reg_list;
 	int ret;
+
+	/*
+	 * Software reset before loading the register set. Every vendor
+	 * table for this part begins this way and s5k3p9sp does the same;
+	 * without it the sensor keeps whatever state the previous session
+	 * left behind.
+	 */
+	ret = cci_write(s5k4h7yx->regmap, S5K4H7YX_REG_SOFTWARE_RESET, 0x01,
+			NULL);
+	if (ret) {
+		dev_err(&client->dev, "failed to issue software reset\n");
+		return ret;
+	}
+	fsleep(3000);
 
 	/* Apply common (PLL, CSI, vendor) registers */
 	ret = cci_multi_reg_write(s5k4h7yx->regmap, s5k4h7yx_common_regs,
