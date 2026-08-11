@@ -102,20 +102,50 @@ static const char *const s5k3p9sp_test_pattern_menu[] = {
 
 /*
  * Advertised link frequencies.  The sensor PLL is configured via register
- * writes and actually produces 366 MHz (full-res) and 348 MHz (binned).
- * We report slightly inflated values (≥ 381 MHz) so that the Qualcomm
- * CSIPHY driver selects a 200 MHz timer source (GPLL0, SRC_SEL 1) instead
- * of 100 MHz (GPLL0_DIV2, SRC_SEL 2) which is non-functional on MSM8953.
+ * writes. Full res is reported honestly at 732 MHz. The binned entry is
+ * still inflated from 348 to 384 so the CSIPHY picks its 200 MHz timer
+ * rather than the 100 MHz one; that rung was broken on MSM8953 until
+ * c6e7d2b9d9c5 fixed its GPLL0_DIV2 mux index, and dropping the
+ * inflation is a separate change that wants its own testing.
  */
 static const s64 s5k3p9sp_link_freq_menu[] = {
-	400000000LL, /* reported to CSIPHY — real PLL rate is 366 MHz */
-	384000000LL, /* reported to CSIPHY — real PLL rate is 348 MHz */
+	732000000LL, /* full res  — 1464 Mbps/lane */
+	384000000LL, /* binned    — inflated from 348; see below */
 };
 
-/* Actual link frequencies produced by the sensor PLL */
+/*
+ * Actual link frequencies produced by the sensor PLL.
+ *
+ * The two modes differ in OP_SYS_CLK_DIV (0x0312): 0 for full res, 1 for
+ * binned. The old formula "24 * mult / 4 / 2" applied the same /2 to
+ * both and so halved the full-res figure, giving 366 MHz for a mode that
+ * really runs at 732.
+ *
+ * That is not a cosmetic error. CAMSS derives the VFE clock from the
+ * pixel rate, and 292.8 Mpix/s picks the 100 MHz rung where 585.6 needs
+ * 160. The RDI path then drains at roughly 427 Mpix/s while the sensor
+ * delivers about 507, and every full-resolution frame arrives corrupted
+ * — noise, with no error reported anywhere. Binned was declared
+ * correctly, stayed under the drain rate, and always worked.
+ *
+ * Corroboration, since Samsung publish no datasheet for this part:
+ *   - MediaTek's vendor driver for the S5K3P9SP programs the identical
+ *     PLL registers for its capture mode (0x0310 = 122, 0x0312 = 0) and
+ *     declares mipi_pixel_rate 586000000, i.e. a 732.5 MHz link. Its
+ *     binned tables (0x0312 = 1) give 278.4 Mpix/s, which matches the
+ *     348 MHz below exactly — so only the full-res figure was wrong.
+ *   - Both modes share LLP 5088 and FLL 3668, a 9.09 us line period. At
+ *     292.8 Mpix/s a 4608-pixel line would need 15.7 us: longer than the
+ *     line itself, and therefore impossible. At 585.6 it takes 7.87 us.
+ *   - Measured on hardware: the binned mode runs at 30.1 fps, matching
+ *     the vendor's "@30fps" mode naming and ruling out the 15 fps that
+ *     the halved figure would imply.
+ *   - Sibling msm8953 ports declare 678-1050 MHz for comparable 16-24 MP
+ *     30 fps modes; nobody declares ~366 MHz for 4608 wide at 30.
+ */
 static const u64 s5k3p9sp_real_link_freq[] = {
-	366000000ULL, /* 24 * 122 / 4 / 2 — full res */
-	348000000ULL, /* 24 * 116 / 4 / 2 — binned */
+	732000000ULL, /* 24 * 122 / 4 — full res, OP_SYS_CLK_DIV = 0 */
+	348000000ULL, /* 24 * 116 / 4 / 2 — binned, OP_SYS_CLK_DIV = 1 */
 };
 
 #define REGS(_list)                               \
