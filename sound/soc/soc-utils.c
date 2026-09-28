@@ -35,7 +35,13 @@ int snd_soc_ret(const struct device *dev, int ret, const char *fmt, ...)
 		vaf.fmt = fmt;
 		vaf.va = &args;
 
-		dev_err(dev, "ASoC error (%d): %pV", ret, &vaf);
+		/*
+		 * Some codecs (e.g. WCD9335 on SLIMbus) reject register reads
+		 * while streaming, and DAPM read-modify-write cycles then
+		 * produce an error per transfer.
+		 */
+		dev_err_ratelimited(dev, "ASoC error (%d): %pV", ret, &vaf);
+		va_end(args);
 	}
 
 	return ret;
