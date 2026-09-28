@@ -24,6 +24,8 @@
 /dts-v1/;
 
 #include <dt-bindings/leds/common.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/sound/qcom,wcd9335.h>
 #include "sdm632.dtsi"
 #include "pm8953.dtsi"
 #include "pmi632.dtsi"
@@ -191,6 +193,33 @@
 			vdd-supply = <&vph_pwr>;
 		};
 	};
+
+	/* WCD9335 MCLK, gated by PM8953 GPIO1 */
+	divclk2_codec: divclk2 {
+		compatible = "gpio-gate-clock";
+		clocks = <&rpmcc RPM_SMD_DIV_CLK2>;
+		#clock-cells = <0>;
+		enable-gpios = <&pm8953_gpios 1 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&tasha_mclk_default>;
+	};
+
+	/*
+	 * External 1.8 V LDO feeding the WCD9335 SIDO buck, TX, RX and pad
+	 * supplies (up to 650 mA combined).
+	 */
+	eldo2_8953: regulator-eldo2-8953 {
+		compatible = "regulator-fixed";
+		regulator-name = "eldo2_8953";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 50 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+		regulator-boot-on;
+		pinctrl-names = "default";
+		pinctrl-0 = <&codec_eldo2_en>;
+	};
 };
 
 &gpu {
@@ -261,6 +290,64 @@
 	firmware-name = "qcom/msm8953/fairphone/fp3/adsp.mbn";
 
 	status = "okay";
+};
+
+/* IOMMU context for audio calibration memory shared with the ADSP */
+&{/soc@0} {
+	msm_audio_ion: msm-audio-ion {
+		compatible = "qcom,msm-audio-ion";
+		iommus = <&apps_iommu 0x0f>;
+	};
+};
+
+&slim_msm {
+	status = "okay";
+
+	slim@1 {
+		reg = <1>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		tasha_ifd: tas-ifd@0,0 {
+			compatible = "slim217,1a0";
+			reg = <0 0>;
+		};
+
+		wcd9335: codec@1,0 {
+			compatible = "slim217,1a0";
+			reg = <1 0>;
+
+			clock-names = "mclk", "slimbus";
+			clocks = <&divclk2_codec>,
+				 <&rpmcc RPM_SMD_BB_CLK1>;
+
+			interrupt-parent = <&tlmm>;
+			interrupts = <73 IRQ_TYPE_LEVEL_HIGH>,
+				     <73 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "intr1", "intr2";
+			interrupt-controller;
+			#interrupt-cells = <1>;
+
+			pinctrl-0 = <&wcd_reset_active &wcd_intr_default>;
+			pinctrl-names = "default";
+
+			reset-gpios = <&tlmm 67 GPIO_ACTIVE_LOW>;
+			slim-ifc-dev = <&tasha_ifd>;
+
+			#sound-dai-cells = <1>;
+
+			vdd-buck-supply = <&eldo2_8953>;
+			vdd-buck-sido-supply = <&eldo2_8953>;
+			vdd-rx-supply = <&eldo2_8953>;
+			vdd-tx-supply = <&eldo2_8953>;
+			vdd-io-supply = <&pm8953_l5>;
+			vdd-vbat-supply = <&vph_pwr>;
+			vdd-micbias-supply = <&pm8953_l13>;
+
+			/* Headset mic on MIC BIAS2 */
+			qcom,micbias2-microvolt = <2800000>;
+		};
+	};
 };
 
 &mdss {
@@ -435,6 +522,14 @@
 	};
 };
 
+/*
+ * The LPASS digital codec is unused. Enabling its MCLK crashes the ADSP
+ * and breaks the SLIMbus NGD handshake.
+ */
+&lpass_codec {
+	status = "disabled";
+};
+
 &sdhc_1 {
 	vmmc-supply = <&pm8953_l8>;
 	vqmmc-supply = <&pm8953_l5>;
@@ -465,6 +560,23 @@
 
 	/* Neither model uses the codec on PM8953. */
 	/delete-property/ audio-routing;
+
+	audio-routing = "Speaker", "OUT",
+			"RX_BIAS", "MCLK",
+			"AMIC2", "MIC BIAS2",
+			"AMIC5", "MIC BIAS3",
+			"AMIC5", "Handset Mic",
+			"AMIC2", "Headset Mic",
+			"Headphone Jack", "HPHL",
+			"Headphone Jack", "HPHR",
+			"Earpiece", "EAR",
+			"DMIC1", "Digital Mic1",
+			"DMIC2", "Digital Mic2";
+	widgets = "Speaker", "Speaker",
+		  "Speaker", "Earpiece";
+	/* wcd9335 does not support jack detection */
+	pin-switches = "Speaker", "Earpiece", "Headphone Jack";
+
 	/delete-node/ primary-mi2s-dai-link;
 	/delete-node/ tertiary-mi2s-dai-link;
 
@@ -495,6 +607,38 @@
 
 		platform {
 			sound-dai = <&q6routing>;
+		};
+	};
+
+	slim-dai-link {
+		link-name = "SLIM Playback";
+
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_0_RX>;
+		};
+
+		platform {
+			sound-dai = <&q6routing>;
+		};
+
+		codec {
+			sound-dai = <&wcd9335 AIF_MIX1_PB>;
+		};
+	};
+
+	slimcap-dai-link {
+		link-name = "SLIM Capture";
+
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_0_TX>;
+		};
+
+		platform {
+			sound-dai = <&q6routing>;
+		};
+
+		codec {
+			sound-dai = <&wcd9335 AIF1_CAP>;
 		};
 	};
 };
@@ -649,6 +793,40 @@
 		function = "pri_mi2s_ws";
 		drive-strength = <2>;
 		bias-pull-down;
+	};
+
+	wcd_reset_active: wcd-reset-active-state {
+		pins = "gpio67";
+		function = "gpio";
+		drive-strength = <16>;
+		output-high;
+	};
+
+	wcd_intr_default: wcd-intr-default-state {
+		pins = "gpio73";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	codec_eldo2_en: codec-eldo2-en-state {
+		pins = "gpio50";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-high;
+	};
+};
+
+&pm8953_gpios {
+	tasha_mclk_default: tasha-mclk-default-state {
+		pins = "gpio1";
+		function = "func1";
+		bias-disable;
+		power-source = <0>;
+		/* div_clk2 only reaches the pad with the output enabled */
+		output-high;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_HIGH>;
 	};
 };
 

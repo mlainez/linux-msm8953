@@ -40,6 +40,7 @@
 #define ASM_PARAM_ID_ENCDEC_ENC_CFG_BLK_V2	0x00010DA3
 #define ASM_SESSION_CMD_RUN_V2			0x00010DAA
 #define ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V2	0x00010DA5
+#define ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V3	0x0001320C
 #define ASM_MEDIA_FMT_MP3			0x00010BE9
 #define ASM_MEDIA_FMT_FLAC			0x00010C16
 #define ASM_MEDIA_FMT_WMA_V9			0x00010DA8
@@ -97,6 +98,23 @@ struct asm_multi_channel_pcm_fmt_blk_v2 {
 	u16 is_signed;
 	u16 reserved;
 	u8 channel_mapping[PCM_MAX_NUM_CHANNEL];
+} __packed;
+
+/*
+ * Multi-channel PCM V3 format block, which unlike V2 carries an explicit
+ * sample_word_size. Linear PCM playback is opened as
+ * ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V3, matching the vendor driver, so the
+ * MSM8953 ADSP RX decoder receives the word size.
+ */
+struct asm_multi_channel_pcm_fmt_blk_v3 {
+	struct asm_data_cmd_media_fmt_update_v2 fmt_blk;
+	u16 num_channels;
+	u16 bits_per_sample;
+	u32 sample_rate;
+	u16 is_signed;
+	u16 sample_word_size;
+	u8 channel_mapping[PCM_MAX_NUM_CHANNEL];
+	u32 reserved;
 } __packed;
 
 struct asm_flac_fmt_blk_v2 {
@@ -912,6 +930,18 @@ err:
 	return rc;
 }
 
+/*
+ * POPP (ASM stream post-processing) topology for OPEN_WRITE. The MSM8953
+ * ADSP firmware does not recognise ASM_NULL_POPP_TOPOLOGY (0x00010C68) and
+ * only accepts the vendor default POPP topology 0x00010BE4. With an
+ * unrecognised topology the POPP has no buffer chain and the RX matrix
+ * routes silence to the AFE port.
+ */
+static uint asm_popp_topology = 0x00010BE4;
+module_param(asm_popp_topology, uint, 0644);
+MODULE_PARM_DESC(asm_popp_topology,
+	"ASM OPEN_WRITE post-processing topology id (default 0x10BE4, null topology 0x10C68)");
+
 /**
  * q6asm_open_write() - Open audio client for writing
  * @ac: audio client pointer
@@ -947,14 +977,14 @@ int q6asm_open_write(struct audio_client *ac, uint32_t stream_id,
 	/* source endpoint : matrix */
 	open->sink_endpointype = ASM_END_POINT_DEVICE_MATRIX;
 	open->bits_per_sample = bits_per_sample;
-	open->postprocopo_id = ASM_NULL_POPP_TOPOLOGY;
+	open->postprocopo_id = asm_popp_topology;
 
 	switch (format) {
 	case SND_AUDIOCODEC_MP3:
 		open->dec_fmt_id = ASM_MEDIA_FMT_MP3;
 		break;
 	case FORMAT_LINEAR_PCM:
-		open->dec_fmt_id = ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V2;
+		open->dec_fmt_id = ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V3;
 		break;
 	case SND_AUDIOCODEC_FLAC:
 		open->dec_fmt_id = ASM_MEDIA_FMT_FLAC;
@@ -1085,7 +1115,7 @@ int q6asm_media_format_block_multi_ch_pcm(struct audio_client *ac,
 					  u8 channel_map[PCM_MAX_NUM_CHANNEL],
 					  uint16_t bits_per_sample)
 {
-	struct asm_multi_channel_pcm_fmt_blk_v2 *fmt;
+	struct asm_multi_channel_pcm_fmt_blk_v3 *fmt;
 	struct apr_pkt *pkt;
 	u8 *channel_mapping;
 	int pkt_size = APR_HDR_SIZE + sizeof(*fmt);
@@ -1104,6 +1134,7 @@ int q6asm_media_format_block_multi_ch_pcm(struct audio_client *ac,
 	fmt->bits_per_sample = bits_per_sample;
 	fmt->sample_rate = rate;
 	fmt->is_signed = 1;
+	fmt->sample_word_size = bits_per_sample;
 
 	channel_mapping = fmt->channel_mapping;
 

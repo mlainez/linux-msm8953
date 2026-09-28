@@ -10,5 +10,6 @@
 #define AIF3_PB                 4
 #define AIF3_CAP                5
 #define AIF4_PB                 6
+#define AIF_MIX1_PB             7
 
 #endif

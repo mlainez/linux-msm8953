@@ -9,6 +9,7 @@
 #include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 #include <sound/pcm.h>
 #include <sound/soc.h>
 #include <sound/pcm_params.h>
@@ -17,6 +18,16 @@
 #include "q6afe.h"
 
 
+/*
+ * The ADSP firmware builds the RX decoder once, in its AFE DEVICE_START
+ * handler, from the VfrD session list. That list is populated by the VfrD
+ * attach that the ADM matrix connect triggers. In DPCM, BE prepare (AFE
+ * DEVICE_START) runs before FE prepare (q6routing matrix map), so starting
+ * the port at prepare builds an empty decoder. The first DEVICE_START of
+ * SLIMBUS_0_RX is therefore deferred to .trigger, after the matrix map, with
+ * no stop in between (q6afe_port_stop() clears the session list). Other
+ * ports, including the TX path, start at prepare.
+ */
 struct q6afe_dai_priv_data {
 	uint32_t sd_line_mask;
 	uint32_t sync_mode;
@@ -435,12 +446,51 @@ static int q6afe_dai_prepare(struct snd_pcm_substream *substream,
 		return -EINVAL;
 	}
 
+	if (dai->id == SLIMBUS_0_RX) {
+		/* Port is configured; DEVICE_START is sent from trigger */
+		dev_dbg(dai->dev,
+			"AFE port %x configured; start deferred to trigger\n",
+			dai->id);
+		return 0;
+	}
+
 	rc = q6afe_port_start(dai_data->port[dai->id]);
 	if (rc < 0) {
 		dev_err(dai->dev, "fail to start AFE port %x\n", dai->id);
 		return rc;
 	}
 	dai_data->is_port_started[dai->id] = true;
+
+	return 0;
+}
+
+static int q6afe_dai_trigger(struct snd_pcm_substream *substream, int cmd,
+			     struct snd_soc_dai *dai)
+{
+	struct q6afe_dai_data *dai_data = dev_get_drvdata(dai->dev);
+	int rc;
+
+	if (dai->id != SLIMBUS_0_RX)
+		return 0;
+
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
+	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		if (dai_data->is_port_started[dai->id])
+			break;
+		rc = q6afe_port_start(dai_data->port[dai->id]);
+		if (rc < 0) {
+			dev_err(dai->dev, "trigger: fail to start AFE port %x\n",
+				dai->id);
+			return rc;
+		}
+		dai_data->is_port_started[dai->id] = true;
+		dev_dbg(dai->dev, "AFE port %x started at trigger\n", dai->id);
+		break;
+	default:
+		break;
+	}
 
 	return 0;
 }
@@ -728,6 +778,7 @@ static const struct snd_soc_dai_ops q6slim_ops = {
 	.probe			= msm_dai_q6_dai_probe,
 	.remove			= msm_dai_q6_dai_remove,
 	.prepare		= q6afe_dai_prepare,
+	.trigger		= q6afe_dai_trigger,
 	.hw_params		= q6slim_hw_params,
 	.shutdown		= q6afe_dai_shutdown,
 	.set_channel_map	= q6slim_set_channel_map,
