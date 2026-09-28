@@ -209,4 +209,15 @@ int slim_stream_disable(struct slim_stream_runtime *stream);
 int slim_stream_unprepare(struct slim_stream_runtime *stream);
 int slim_stream_free(struct slim_stream_runtime *stream);
 
+/*
+ * Manager-side (AP) port allocation, for controllers that own data
+ * pipes between the AP and the bus. Returns -EOPNOTSUPP if the
+ * controller does not implement it. On success ports[i] holds the
+ * manager-side port number to pair with the codec's i-th channel.
+ */
+int slim_alloc_mgrports(struct slim_device *sb, unsigned int nports,
+			u8 *ports);
+int slim_dealloc_mgrports(struct slim_device *sb, unsigned int nports,
+			  u8 *ports);
+
 #endif /* _LINUX_SLIMBUS_H */
