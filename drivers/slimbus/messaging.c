@@ -165,9 +165,14 @@ int slim_do_transfer(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 		}
 	}
 
+	/*
+	 * Codecs such as WCD9335 NACK control reads while streaming and may
+	 * NACK many accesses during init.
+	 */
 	if (ret)
-		dev_err(ctrl->dev, "Tx:MT:0x%x, MC:0x%x, LA:0x%x failed:%d\n",
-			txn->mt, txn->mc, txn->la, ret);
+		dev_err_ratelimited(ctrl->dev,
+				    "Tx:MT:0x%x, MC:0x%x, LA:0x%x failed:%d\n",
+				    txn->mt, txn->mc, txn->la, ret);
 
 slim_xfer_err:
 	if (!clk_pause_msg && (txn->tid == 0  || ret == -ETIMEDOUT)) {
