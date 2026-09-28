@@ -190,8 +190,13 @@ EXPORT_SYMBOL_GPL(slim_do_transfer);
 static int slim_val_inf_sanity(struct slim_controller *ctrl,
 			       struct slim_val_inf *msg, u8 mc)
 {
+	/*
+	 * Value-element offsets are 12 bits on the wire. WCD9335 places its
+	 * register window at offset 0x800, so callers may pass offsets up to
+	 * 0x17ff; only the low 12 bits are transmitted.
+	 */
 	if (!msg || msg->num_bytes > 16 ||
-	    (msg->start_offset + msg->num_bytes) > 0xC00)
+	    ((msg->start_offset & 0xFFF) + msg->num_bytes) > 0x1000)
 		goto reterr;
 	switch (mc) {
 	case SLIM_MSG_MC_REQUEST_VALUE:
