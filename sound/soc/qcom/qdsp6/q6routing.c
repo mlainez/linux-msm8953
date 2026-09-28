@@ -26,6 +26,23 @@
 
 #define DRV_NAME "q6routing-component"
 
+/*
+ * COPP topology for ADM_CMD_DEVICE_OPEN_V5. The MSM8953 ADSP firmware does
+ * not recognise NULL_COPP_TOPOLOGY (0x00010312): it opens an empty COPP that
+ * routes silence to the AFE port. It accepts 0x00010313, the topology the
+ * vendor driver uses.
+ */
+#define Q6ROUTING_RX_TOPOLOGY 0x00010313
+
+/*
+ * RX matrix re-assert delay (ms). The ADM matrix output connect (COPP to AFE,
+ * which triggers the VfrD attach that builds the RX decoder) is sent once
+ * from FE prepare, before the ASM session runs and the AFE RX port starts.
+ * The RX MATRIX_MAP is sent again this long after stream open, when the port
+ * and session are running, so that the ADSP realises the output connect.
+ */
+#define Q6ROUTING_RX_REASSERT_MS 80
+
 #define Q6ROUTING_RX_MIXERS(id)						\
 	SOC_SINGLE_EXT("MultiMedia1", id,				\
 	MSM_FRONTEND_DAI_MULTIMEDIA1, 1, 0, msm_routing_get_audio_mixer,\
@@ -344,9 +361,29 @@ struct msm_routing_data {
 	struct session_data port_data[AFE_MAX_PORTS];
 	struct device *dev;
 	struct mutex lock;
+	/* RX matrix re-assert (see Q6ROUTING_RX_REASSERT_MS) */
+	struct delayed_work rx_reassert_work;
+	struct route_payload rx_reassert_payload;
+	int rx_reassert_path;
+	int rx_reassert_perf;
 };
 
 static struct msm_routing_data *routing_data;
+
+static void q6routing_rx_reassert_fn(struct work_struct *work)
+{
+	struct msm_routing_data *d =
+		container_of(to_delayed_work(work), struct msm_routing_data,
+			     rx_reassert_work);
+
+	if (!d->rx_reassert_payload.num_copps)
+		return;
+	dev_dbg(d->dev, "rx_reassert: MATRIX_MAP path=%d session=%d num_copps=%d\n",
+		d->rx_reassert_path, d->rx_reassert_payload.session_id,
+		d->rx_reassert_payload.num_copps);
+	q6adm_matrix_map(d->dev, d->rx_reassert_path,
+			 d->rx_reassert_payload, d->rx_reassert_perf);
+}
 
 /**
  * q6routing_stream_open() - Register a new stream for route setup
@@ -390,16 +427,30 @@ int q6routing_stream_open(int fedai_id, int perf_mode,
 	session->bits_per_sample = pdata->bits_per_sample;
 
 	payload.num_copps = 0; /* only RX needs to use payload */
-	topology = NULL_COPP_TOPOLOGY;
+	topology = Q6ROUTING_RX_TOPOLOGY;
+
+	dev_dbg(routing_data->dev,
+		"stream_open: port_id=0x%x path=%d rate=%d ch=%d bps=%d fedai=%d stream=%d\n",
+		session->port_id, session->path_type, session->sample_rate,
+		session->channels, session->bits_per_sample,
+		fedai_id, stream_id);
+
 	copp = q6adm_open(routing_data->dev, session->port_id,
 			      session->path_type, session->sample_rate,
 			      session->channels, topology, perf_mode,
 			      session->bits_per_sample, 0, 0);
 
 	if (IS_ERR_OR_NULL(copp)) {
+		dev_err(routing_data->dev,
+			"q6adm_open failed: port=0x%x err=%ld\n",
+			session->port_id, PTR_ERR(copp));
 		mutex_unlock(&routing_data->lock);
 		return -EINVAL;
 	}
+
+	dev_dbg(routing_data->dev,
+		"stream_open: copp_idx=%d for port=0x%x\n",
+		q6adm_get_copp_id(copp), session->port_id);
 
 	copp_idx = q6adm_get_copp_id(copp);
 	set_bit(copp_idx, &session->copp_map);
@@ -412,10 +463,39 @@ int q6routing_stream_open(int fedai_id, int perf_mode,
 	}
 
 	if (num_copps) {
+		int mmret;
+
 		payload.num_copps = num_copps;
 		payload.session_id = stream_id;
-		q6adm_matrix_map(routing_data->dev, session->path_type,
+		mmret = q6adm_matrix_map(routing_data->dev, session->path_type,
 				 payload, perf_mode);
+		/*
+		 * A failed matrix map leaves the RX path without a route: the
+		 * ADSP outputs silence and the codec underflows.
+		 */
+		if (mmret < 0)
+			dev_err(routing_data->dev,
+				"MATRIX_MAP failed ret=%d path=%d sess=%d num_copps=%d port=0x%x\n",
+				mmret, session->path_type, stream_id, num_copps,
+				session->port_id);
+		else
+			dev_dbg(routing_data->dev,
+				"MATRIX_MAP ok: path=%d sess=%d num_copps=%d port=0x%x copp_idx=%d\n",
+				session->path_type, stream_id, num_copps,
+				session->port_id, payload.copp_idx[0]);
+
+		/*
+		 * Playback only: send the matrix map again once the port and
+		 * session are running (see Q6ROUTING_RX_REASSERT_MS).
+		 */
+		if (session->path_type == ADM_PATH_PLAYBACK) {
+			routing_data->rx_reassert_payload = payload;
+			routing_data->rx_reassert_path = session->path_type;
+			routing_data->rx_reassert_perf = perf_mode;
+			mod_delayed_work(system_wq,
+					 &routing_data->rx_reassert_work,
+					 msecs_to_jiffies(Q6ROUTING_RX_REASSERT_MS));
+		}
 	}
 	mutex_unlock(&routing_data->lock);
 
@@ -1140,6 +1220,8 @@ static int q6pcm_routing_probe(struct platform_device *pdev)
 	routing_data->dev = dev;
 
 	mutex_init(&routing_data->lock);
+	INIT_DELAYED_WORK(&routing_data->rx_reassert_work,
+			  q6routing_rx_reassert_fn);
 	dev_set_drvdata(dev, routing_data);
 
 	return devm_snd_soc_register_component(dev, &msm_soc_routing_component,
@@ -1148,6 +1230,7 @@ static int q6pcm_routing_probe(struct platform_device *pdev)
 
 static void q6pcm_routing_remove(struct platform_device *pdev)
 {
+	cancel_delayed_work_sync(&routing_data->rx_reassert_work);
 	kfree(routing_data);
 	routing_data = NULL;
 }

@@ -652,6 +652,10 @@ struct regmap *__regmap_init_slimbus(struct slim_device *slimbus,
 				 const struct regmap_config *config,
 				 struct lock_class_key *lock_key,
 				 const char *lock_name);
+struct regmap *__regmap_init_slimbus_paged(struct slim_device *slimbus,
+				 const struct regmap_config *config,
+				 struct lock_class_key *lock_key,
+				 const char *lock_name);
 struct regmap *__regmap_init_spi(struct spi_device *dev,
 				 const struct regmap_config *config,
 				 struct lock_class_key *lock_key,
@@ -855,6 +859,25 @@ int regmap_attach_dev(struct device *dev, struct regmap *map,
  */
 #define regmap_init_slimbus(slimbus, config)				\
 	__regmap_lockdep_wrapper(__regmap_init_slimbus, #config,	\
+				slimbus, config)
+
+/**
+ * regmap_init_slimbus_paged() - SLIMbus regmap with manual page tracking
+ *
+ * @slimbus: Device that will be interacted with
+ * @config: Configuration for register map. Must not set .ranges; paging
+ *	is handled by the bus.
+ *
+ * For SLIMbus codecs whose page-selector register is write-only
+ * (e.g. WCD9335). The bus caches the current page, writes the selector
+ * only when the page changes and never reads it back.
+ *
+ * Register address layout: bits[15:8] = page, bits[7:0] = offset.
+ * The page is written to 0x800 and the register accessed at
+ * 0x800 + offset.
+ */
+#define regmap_init_slimbus_paged(slimbus, config)			\
+	__regmap_lockdep_wrapper(__regmap_init_slimbus_paged, #config,	\
 				slimbus, config)
 
 /**

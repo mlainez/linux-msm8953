@@ -717,6 +717,12 @@
 			no-map;
 		};
 
+		adsp_mem: adsp-region {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0 0x400000>;
+		};
+
 		cont_splash_mem: cont-splash@90001000 {
 			reg = <0x0 0x90001000 0x0 0x13ff000>;
 			no-map;
@@ -2074,6 +2080,13 @@
 			#iommu-cells = <1>;
 			#size-cells = <1>;
 
+			/* Audio ION, SID 0x2401 */
+			iommu-ctx@f000 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0xf000 0x1000>;
+				interrupts = <GIC_SPI 104 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
 			/* VFE */
 			iommu-ctx@14000 {
 				compatible = "qcom,msm-iommu-v1-ns";
@@ -3024,6 +3037,13 @@
 				};
 			};
 
+			mm5-dai-link {
+				link-name = "MultiMedia5";
+				cpu {
+					sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA5>;
+				};
+			};
+
 			voicemmode1-dai-link {
 				link-name = "VoiceMMode1";
 				cpu {
@@ -3071,6 +3091,43 @@
 					   LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
 				 <&xo_board>;
 			clock-names = "mclk", "ahbix-clk";
+		};
+
+		slimbam: dma-controller@c104000 {
+			compatible = "qcom,bam-v1.7.0";
+			qcom,controlled-remotely;
+			reg = <0x0c104000 0x2a000>;
+			num-channels = <31>;
+			interrupts = <GIC_SPI 180 IRQ_TYPE_LEVEL_HIGH>;
+			#dma-cells = <1>;
+			qcom,ee = <1>;
+			qcom,num-ees = <2>;
+		};
+
+		slim_msm: slim-ngd@c140000 {
+			compatible = "qcom,slim-ngd-msm8953";
+			reg = <0x0c140000 0x2c000>,
+			      <0x0c104000 0x2a000>;
+			reg-names = "slimbus_physical",
+				    "slimbus_bam_physical";
+			interrupts = <GIC_SPI 163 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 180 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "slimbus_irq",
+					  "slimbus_bam_irq";
+			cell-index = <1>;
+			qcom,apps-ch-pipes = <0x600000>;
+			qcom,ea-pc = <0x200>;
+			/*
+			 * Message queue pipes start at NGD_STATUS[9:2] = 3:
+			 * RX is pipe 3, TX is pipe 4.
+			 */
+			dmas = <&slimbam 3>, <&slimbam 4>,
+			       <&slimbam 21>, <&slimbam 22>;
+			dma-names = "rx", "tx",
+				    "data-port0", "data-port1";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
 		};
 
 		lpass: remoteproc@c200000 {
@@ -3138,6 +3195,12 @@
 								reg = <QUINARY_MI2S_RX>;
 								qcom,sd-lines = <0>;
 							};
+							dai@2 {
+								reg = <SLIMBUS_0_RX>;
+							};
+							dai@3 {
+								reg = <SLIMBUS_0_TX>;
+							};
 						};
 
 						q6afecc: clock-controller {
@@ -3172,6 +3235,10 @@
 								direction = <Q6ASM_DAI_RX>;
 								is-compress-dai;
 							};
+							dai@4 {
+								reg = <MSM_FRONTEND_DAI_MULTIMEDIA5>;
+								direction = <Q6ASM_DAI_RX>;
+							};
 						};
 					};
 
@@ -3202,6 +3269,31 @@
 					q6cvp: service@b {
 						compatible = "qcom,q6cvp";
 						reg = <APR_SVC_ADSP_CVP>;
+					};
+				};
+
+				fastrpc {
+					compatible = "qcom,fastrpc";
+					qcom,smd-channels = "fastrpcsmd-apps-dsp";
+					label = "adsp";
+					qcom,non-secure-domain;
+					memory-region = <&adsp_mem>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					cb@1 {
+						compatible = "qcom,fastrpc-compute-cb";
+						reg = <1>;
+					};
+
+					cb@2 {
+						compatible = "qcom,fastrpc-compute-cb";
+						reg = <2>;
+					};
+
+					cb@3 {
+						compatible = "qcom,fastrpc-compute-cb";
+						reg = <3>;
 					};
 				};
 			};
