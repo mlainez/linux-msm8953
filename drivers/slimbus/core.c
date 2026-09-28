@@ -74,11 +74,11 @@ static int slim_device_probe(struct device *dev)
 	if (!ret) {
 		slim_device_update_status(sbdev, SLIM_DEVICE_STATUS_UP);
 	} else {
-		dev_err(&sbdev->dev, "Failed to get logical address\n");
-		ret = -EPROBE_DEFER;
+		dev_dbg(&sbdev->dev,
+			"logical address not yet available, deferring status update\n");
 	}
 
-	return ret;
+	return 0;
 }
 
 static void slim_device_remove(struct device *dev)
