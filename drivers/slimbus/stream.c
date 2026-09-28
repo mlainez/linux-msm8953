@@ -6,8 +6,21 @@
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/slimbus.h>
+#include <linux/moduleparam.h>
 #include <uapi/sound/asound.h>
 #include "slimbus.h"
+
+/*
+ * Defer CONNECT_SINK for sink ports from prepare to the controller's
+ * enable_stream, so that connect, define and activate happen in a single
+ * reconfiguration. The ADSP-managed framer on Qualcomm NGD controllers does
+ * not bring up the channel when the connect arrives in an earlier
+ * reconfiguration. Source ports are not affected.
+ */
+static bool defer_sink_connect = true;
+module_param(defer_sink_connect, bool, 0644);
+MODULE_PARM_DESC(defer_sink_connect,
+	"Defer sink port CONNECT_SINK from prepare to enable_stream");
 
 /**
  * struct segdist_code - Segment Distributions code from
@@ -261,7 +274,16 @@ int slim_stream_prepare(struct slim_stream_runtime *rt,
 		else
 			port->direction = SLIM_PORT_SOURCE;
 
-		slim_connect_port_channel(rt, port);
+		/*
+		 * The controller connects deferred sink ports in enable_stream.
+		 * Mark the channel associated so teardown stays consistent.
+		 */
+		if (defer_sink_connect && port->direction == SLIM_PORT_SINK) {
+			port->ch.state = SLIM_CH_STATE_ASSOCIATED;
+			port->state = SLIM_PORT_UNCONFIGURED;
+		} else {
+			slim_connect_port_channel(rt, port);
+		}
 		i++;
 	}
 
