@@ -505,7 +505,13 @@ DEFINE_CLK_SMD_RPM_XO_BUFFER_PINCTRL(cxo_a2, 6, 19200000);
 
 DEFINE_CLK_SMD_RPM_XO_BUFFER(diff_clk, 7, 19200000);
 DEFINE_CLK_SMD_RPM_XO_BUFFER(div_clk1, 11, 19200000);
-DEFINE_CLK_SMD_RPM_XO_BUFFER(div_clk2, 12, 19200000);
+/*
+ * div_clk2 is the WCD9335 MCLK. The RPM resource only drives the pad when
+ * the buffer is enabled with KEY_SOFTWARE_ENABLE, which XO_BUFFER sends;
+ * KEY_RATE alone programs the divider but leaves the output off. The
+ * resource outputs 9.6 MHz natively.
+ */
+DEFINE_CLK_SMD_RPM_XO_BUFFER(div_clk2, 12, 9600000);
 DEFINE_CLK_SMD_RPM_XO_BUFFER(div_clk3, 13, 19200000);
 
 static const struct clk_smd_rpm *bimc_pcnoc_icc_clks[] = {
