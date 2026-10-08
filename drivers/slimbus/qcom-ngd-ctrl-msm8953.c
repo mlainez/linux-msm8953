@@ -484,11 +484,6 @@ static bool msm8953_slim_complete_wr(struct msm8953_slim_ctrl *dev)
 	return completed;
 }
 
-/* DMA TX callback: signal completion */
-static void msm8953_slim_dma_tx_cb(void *arg)
-{
-	msm8953_slim_complete_wr(arg);
-}
 
 /* BAM v1.7.0 pipe register offsets: base 0x13000, stride 0x1000 per pipe */
 #define BAM17_P_CTRL(p)		(0x13000 + (p) * 0x1000)
@@ -518,8 +513,6 @@ static int msm8953_slim_bam_tx(struct msm8953_slim_ctrl *dev,
 			return -ENOMEM;
 		}
 
-		desc->callback = msm8953_slim_dma_tx_cb;
-		desc->callback_param = dev;
 		desc->cookie = dmaengine_submit(desc);
 		dma_async_issue_pending(dev->dma_tx_channel);
 

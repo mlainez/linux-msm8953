@@ -309,7 +309,6 @@ struct wcd9335_codec {
 	struct clk *mclk;
 	struct clk *native_clk;
 	u32 mclk_rate;
-	bool tx_port_kicked;	/* one-time TX SLIM-port activation kick done */
 
 	struct slim_device *slim;
 	struct slim_device *slim_ifc_dev;
@@ -1709,6 +1708,41 @@ static int wcd9335_set_interpolator_rate(struct snd_soc_dai *dai, u32 rate)
 	return 0;
 }
 
+/*
+ * TX SLIM PORT_CFG value: (12-byte watermark << 1) | ENABLE (bit 0). Without
+ * the enable bit the codec TX port never drives its bus slot.
+ */
+#define WCD9335_TX_PORT_CFG 0x05
+
+/*
+ * Arm a capture DAI's TX port: channel mask (MULTI_CHANNEL_0/1 at
+ * 0x100/0x101 + 4 * port) and PORT_CFG (0x050 + port). The codec only
+ * activates a TX port that is already enabled when its source is
+ * connected, so this has to run before slim_stream_prepare() sends
+ * CONNECT_SOURCE. Armed later, the port stays idle until it is connected
+ * again and the first capture after boot records silence.
+ */
+static void wcd9335_slim_arm_tx_port(struct wcd9335_codec *wcd,
+				     struct wcd_slim_codec_dai_data *dai_data)
+{
+	struct wcd9335_slim_ch *ch;
+	u8 mc0 = 0, mc1 = 0, port = U8_MAX;
+
+	list_for_each_entry(ch, &dai_data->slim_ch_list, list) {
+		if (ch->shift < 8)
+			mc0 |= BIT(ch->shift);
+		else
+			mc1 |= BIT(ch->shift - 8);
+		port = min_t(u8, port, ch->port);
+	}
+	if (port == U8_MAX)
+		return;
+
+	wcd9335_ifc_write(wcd, 0x100 + 4 * port, mc0);
+	wcd9335_ifc_write(wcd, 0x101 + 4 * port, mc1);
+	wcd9335_ifc_write(wcd, 0x050 + port, WCD9335_TX_PORT_CFG);
+}
+
 static int wcd9335_slim_set_hw_params(struct wcd9335_codec *wcd,
 				      struct wcd_slim_codec_dai_data *dai_data,
 				      int direction)
@@ -1850,6 +1884,9 @@ static int wcd9335_hw_params(struct snd_pcm_substream *substream,
 	{
 		struct wcd_slim_codec_dai_data *dd = &wcd->dai[dai->id];
 
+		if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
+			wcd9335_slim_arm_tx_port(wcd, dd);
+
 		if (dd->sruntime) {
 			int ret2;
 
@@ -1864,22 +1901,6 @@ static int wcd9335_hw_params(struct snd_pcm_substream *substream,
 
 	return 0;
 }
-
-/*
- * TX SLIM PORT_CFG value: (12-byte watermark << 1) | ENABLE (bit 0). Without
- * the enable bit the codec TX port never drives its bus slot.
- */
-#define WCD9335_TX_PORT_CFG 0x05
-
-/*
- * TX port activation kick: after a cold boot the codec TX SLIM port does not
- * drive its scheduled bus slot until its PORT_INT_STATUS is read. The read
- * clears a stale port interrupt that otherwise gates the port, leaving the
- * AFE sink reading idle zeros. A one-time read after a short settle latches
- * the port active and it stays active.
- */
-#define WCD9335_TX_KICK_SETTLE_MS 120
-#define WCD9335_TX_KICK_READS 4
 
 
 static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
@@ -1943,71 +1964,6 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 				}
 			}
 
-			/*
-			 * Program the codec TX port MULTI_CHANNEL + PORT_CFG
-			 * via IFC. RX ports are programmed from the AIF RX
-			 * widget's POST_PMU event instead, before the channel
-			 * is activated.
-			 *
-			 * Address map (Tasha-lite):
-			 *   TX MULTI_CHANNEL_0 @ 0x100 + 4*port
-			 *   TX MULTI_CHANNEL_1 @ 0x101 + 4*port
-			 *   TX PORT_CFG        @ 0x050 + port (watermark+EN)
-			 *   RX MULTI_CHANNEL_0 @ 0x140 + 4*port
-			 *   RX PORT_CFG        @ 0x030 + port
-			 *
-			 * Payload = OR of (1 << ch->shift) across channels on
-			 * the port. Watermark value 0x05 = (12-byte WM << 1)
-			 * | ENABLE.
-			 */
-			{
-				struct wcd9335_slim_ch *ch;
-				u16 tx_payload_0 = 0, tx_payload_1 = 0;
-				u16 rx_payload = 0;
-				u8  tx_port_min = 0xFF, rx_port_min = 0xFF;
-				list_for_each_entry(ch, &dai_data->slim_ch_list, list) {
-					if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-						rx_payload |= 1 << ch->shift;
-						if (ch->port < rx_port_min)
-							rx_port_min = ch->port;
-					} else {
-						if (ch->shift < 8)
-							tx_payload_0 |= 1 << ch->shift;
-						else
-							tx_payload_1 |= 1 << (ch->shift - 8);
-						if (ch->port < tx_port_min)
-							tx_port_min = ch->port;
-					}
-				}
-
-				if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-					dev_dbg(wcd->dev,
-						 "trigger: RX port programmed at AIF RX POST_PMU\n");
-				} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE &&
-					   tx_port_min != 0xFF) {
-					int r1, r2, r3;
-					u16 mc0_addr = 0x100 + 4 * tx_port_min;
-					u16 mc1_addr = 0x101 + 4 * tx_port_min;
-					u16 cfg_addr = 0x050 + tx_port_min;
-
-					/*
-					 * Same values as the vendor
-					 * driver. PORT_CFG bit 3 (0x08)
-					 * is a status bit the codec sets
-					 * while the framer schedules the
-					 * port; it must not be written.
-					 */
-					r1 = wcd9335_ifc_write(wcd, mc0_addr, tx_payload_0 & 0xFF);
-					r2 = wcd9335_ifc_write(wcd, mc1_addr, tx_payload_1 & 0xFF);
-					r3 = wcd9335_ifc_write(wcd, cfg_addr, (u8)WCD9335_TX_PORT_CFG);
-					dev_dbg(wcd->dev,
-						 "PGD-prog (trigger) TX port=%d MC0@0x%03x=0x%02x (r=%d) MC1@0x%03x=0x%02x (r=%d) CFG@0x%03x=0x%02x (r=%d)\n",
-						 tx_port_min, mc0_addr, tx_payload_0 & 0xFF, r1,
-						 mc1_addr, tx_payload_1 & 0xFF, r2,
-						 cfg_addr, (u8)WCD9335_TX_PORT_CFG, r3);
-				}
-			}
-
 			/* Read back the RX0 -> INT0 mux routing */
 			regmap_read(wcd->regmap,
 				    WCD9335_CDC_RX_INP_MUX_RX_INT0_CFG0,
@@ -2033,51 +1989,6 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 				dev_warn(wcd->dev,
 					 "trigger START: slim_stream_enable=%d\n",
 					 ret2);
-
-			/*
-			 * One-time TX port activation kick (see
-			 * WCD9335_TX_KICK_SETTLE_MS). Reading PORT_INT_STATUS
-			 * (0x090 + port) once after a short settle clears the
-			 * stale port interrupt, and the port then stays
-			 * active for the life of the bus. Later captures
-			 * need no reads, which avoids bus traffic during
-			 * streaming.
-			 */
-			{
-				bool is_rx = (substream->stream ==
-					      SNDRV_PCM_STREAM_PLAYBACK);
-
-				/*
-				 * Only TX ports need the kick: a TX port
-				 * is a source that the kick makes drive
-				 * the bus. An RX port is a sink, and the
-				 * settle delay would only stall an
-				 * already active stream.
-				 */
-				if (!is_rx && !wcd->tx_port_kicked) {
-					struct wcd9335_slim_ch *kch;
-					int kj;
-					u8 kst = 0;
-
-					if (WCD9335_TX_KICK_SETTLE_MS > 0)
-						msleep(WCD9335_TX_KICK_SETTLE_MS);
-					list_for_each_entry(kch,
-						&dai_data->slim_ch_list, list) {
-						for (kj = 0; kj < WCD9335_TX_KICK_READS; kj++) {
-							wcd9335_ifc_read(wcd,
-								0x090 + kch->port, &kst);
-							usleep_range(300, 500);
-						}
-						dev_dbg(wcd->dev,
-							 "TX-port kick: port=%u stat=0x%02x (settle=%dms reads=%d)\n",
-							 kch->port, kst,
-							 WCD9335_TX_KICK_SETTLE_MS,
-							 WCD9335_TX_KICK_READS);
-					}
-					wcd->tx_port_kicked = true;
-				}
-			}
-
 		}
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
