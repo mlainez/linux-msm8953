@@ -1921,19 +1921,25 @@ static int wcd9335_trigger(struct snd_pcm_substream *substream, int cmd,
 
 			/*
 			 * Clear any stale port interrupts (OVERFLOW,
-			 * PORT_CLOSED) left over from ADSP SSR recovery.
-			 * Without this, PORT_CLOSED persists and blocks
-			 * data flow even though PORT_CFG is enabled.
+			 * PORT_CLOSED) left over from boot or ADSP SSR
+			 * recovery. Without this, PORT_CLOSED persists and
+			 * blocks data flow even though PORT_CFG is enabled.
+			 * RX ports are numbered from WCD9335_RX_START and
+			 * cleared through the RX registers, TX ports from 0
+			 * through the TX registers.
 			 */
 			{
 				struct wcd9335_slim_ch *ch;
 
 				list_for_each_entry(ch, &dai_data->slim_ch_list, list) {
-					int port_grp = (ch->port - WCD9335_RX_START) / 8;
+					unsigned int clr = WCD9335_SLIM_PGD_PORT_INT_CLR_TX_0;
+					unsigned int p = ch->port;
 
-					wcd9335_ifc_write(wcd,
-						WCD9335_SLIM_PGD_PORT_INT_CLR_RX_0 + port_grp,
-						BIT((ch->port - WCD9335_RX_START) % 8));
+					if (p >= WCD9335_RX_START) {
+						clr = WCD9335_SLIM_PGD_PORT_INT_CLR_RX_0;
+						p -= WCD9335_RX_START;
+					}
+					wcd9335_ifc_write(wcd, clr + p / 8, BIT(p % 8));
 				}
 			}
 
