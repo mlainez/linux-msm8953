@@ -337,7 +337,13 @@ struct msm8953_slim_ctrl {
 	spinlock_t rx_lock;
 	/* Static TX buffer; protected by tx_lock */
 	u32 tx_buf[10];
-	/* Single TX-completion slot; protected by tx_lock */
+	/*
+	 * Single TX-completion slot, pointing at the sender's on-stack
+	 * completion. Senders hold tx_lock; wr_lock also orders them
+	 * against the DMA callback and the IRQ handler, so a sender that
+	 * timed out cannot return while one of those is completing it.
+	 */
+	spinlock_t wr_lock;
 	struct completion *wr_comp;
 	int err;
 	atomic_t ssr_in_progress;
@@ -452,17 +458,36 @@ static inline void __iomem *ngd_base(struct msm8953_slim_ctrl *dev)
 	return dev->base + NGD_BASE(dev->ctrl_nr);
 }
 
+static void msm8953_slim_set_wr_comp(struct msm8953_slim_ctrl *dev,
+				     struct completion *comp)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->wr_lock, flags);
+	dev->wr_comp = comp;
+	spin_unlock_irqrestore(&dev->wr_lock, flags);
+}
+
+static bool msm8953_slim_complete_wr(struct msm8953_slim_ctrl *dev)
+{
+	unsigned long flags;
+	bool completed = false;
+
+	spin_lock_irqsave(&dev->wr_lock, flags);
+	if (dev->wr_comp) {
+		complete(dev->wr_comp);
+		dev->wr_comp = NULL;
+		completed = true;
+	}
+	spin_unlock_irqrestore(&dev->wr_lock, flags);
+
+	return completed;
+}
+
 /* DMA TX callback: signal completion */
 static void msm8953_slim_dma_tx_cb(void *arg)
 {
-	struct msm8953_slim_ctrl *dev = arg;
-
-	if (dev->wr_comp) {
-		struct completion *comp = dev->wr_comp;
-
-		dev->wr_comp = NULL;
-		complete(comp);
-	}
+	msm8953_slim_complete_wr(arg);
 }
 
 /* BAM v1.7.0 pipe register offsets: base 0x13000, stride 0x1000 per pipe */
@@ -639,12 +664,7 @@ static irqreturn_t msm8953_slim_interrupt(int irq, void *d)
 				     stat, dev->err);
 		/* Publish dev->err before completing the waiter */
 		mb();
-		if (dev->wr_comp) {
-			struct completion *comp = dev->wr_comp;
-
-			dev->wr_comp = NULL;
-			complete(comp);
-		}
+		msm8953_slim_complete_wr(dev);
 	}
 
 	/* TX sent successfully (AHB path) */
@@ -652,15 +672,8 @@ static irqreturn_t msm8953_slim_interrupt(int irq, void *d)
 		writel_relaxed(NGD_INT_TX_MSG_SENT, ngd + NGD_INT_CLR);
 		/* Complete the IRQ clear before signalling the waiter */
 		mb();
-		if (dev->wr_comp) {
-			struct completion *comp = dev->wr_comp;
-
-			dev->wr_comp = NULL;
-			dev_dbg(dev->dev, "TX_MSG_SENT: completing wr_comp\n");
-			complete(comp);
-		} else {
+		if (!msm8953_slim_complete_wr(dev))
 			dev_dbg(dev->dev, "TX_MSG_SENT: no wr_comp set!\n");
-		}
 	}
 
 	/* RX message received via register (no BAM needed for enumeration) */
@@ -1480,7 +1493,7 @@ retry:
 	*puc++ = SAT_MSG_VER;
 	*puc++ = SAT_MSG_PROT;
 
-	dev->wr_comp = &tx_sent;
+	msm8953_slim_set_wr_comp(dev, &tx_sent);
 	dev->err = 0;
 
 	/*
@@ -1535,7 +1548,7 @@ retry:
 	dev_dbg(dev->dev, "REPORT_SATELLITE sent\n");
 
 out:
-	dev->wr_comp = NULL;
+	msm8953_slim_set_wr_comp(dev, NULL);
 	return ret;
 }
 
@@ -1865,7 +1878,7 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 	}
 
 	pbuf = dev->tx_buf;
-	dev->wr_comp = &tx_sent;
+	msm8953_slim_set_wr_comp(dev, &tx_sent);
 	dev->err = 0;
 
 	/* Assemble message header */
@@ -1927,7 +1940,7 @@ static int msm8953_slim_xfer_msg(struct slim_controller *ctrl,
 		}
 	}
 
-	dev->wr_comp = NULL;
+	msm8953_slim_set_wr_comp(dev, NULL);
 
 	if (ret) {
 		/*
@@ -2060,7 +2073,7 @@ static int msm8953_slim_get_laddr(struct slim_controller *ctrl,
 		ea->manf_id, ea->prod_code, ea->dev_index, ea->instance,
 		txn.tid, buf);
 
-	dev->wr_comp = &tx_sent;
+	msm8953_slim_set_wr_comp(dev, &tx_sent);
 	dev->err = 0;
 
 	if (dev->use_bam_tx) {
@@ -2082,7 +2095,7 @@ static int msm8953_slim_get_laddr(struct slim_controller *ctrl,
 		goto out_free_tid;
 	}
 
-	dev->wr_comp = NULL;
+	msm8953_slim_set_wr_comp(dev, NULL);
 
 	/* Wait for ADDR_REPLY from ADSP */
 	timeout = wait_for_completion_timeout(&done, 2 * HZ);
@@ -2109,7 +2122,7 @@ out_free_tid:
 	spin_lock_irq(&ctrl->txn_lock);
 	idr_remove(&ctrl->tid_idr, txn.tid);
 	spin_unlock_irq(&ctrl->txn_lock);
-	dev->wr_comp = NULL;
+	msm8953_slim_set_wr_comp(dev, NULL);
 
 	/*
 	 * Return -EAGAIN so the retry loop in slave_notify_worker keeps
@@ -2775,6 +2788,7 @@ static int msm8953_slim_probe(struct platform_device *pdev)
 	init_completion(&dev->qmi_up);
 	mutex_init(&dev->tx_lock);
 	spin_lock_init(&dev->rx_lock);
+	spin_lock_init(&dev->wr_lock);
 	memset(dev->pipe_map, 0xFF, sizeof(dev->pipe_map));
 	dev->pipe_alloc = 0;
 	atomic_set(&dev->ssr_in_progress, 0);
