@@ -69,14 +69,17 @@ static const struct regmap_bus regmap_slimbus_bus = {
  *   - VE 0x801..0x8ff: registers 0x01..0xff of the selected page
  *
  * Register addresses are (page << 8) | offset. The selector cannot be read,
- * so regmap_range_cfg (which read-modify-writes it) cannot be used; the
- * current page is cached here and the selector is written only when the
- * page changes.
+ * so regmap_range_cfg (which read-modify-writes it) cannot be used.
+ *
+ * The selector is written before every access rather than cached: once
+ * the ADSP has been given AFE_PARAM_ID_CDC_REG_PAGE_CFG it programs codec
+ * registers itself when it starts a SLIMbus port, moving the selector
+ * behind our back. A cached page then sends the next access to whatever
+ * page the ADSP left selected, while regcache records it as written.
  */
 struct regmap_slimbus_paged_ctx {
 	struct slim_device *sdev;
 	struct mutex page_lock;
-	int current_page;	/* -1: unknown, selector must be written */
 };
 
 /* Offset 0 of every page is the selector itself. */
@@ -90,20 +93,12 @@ static int regmap_slimbus_select_page(struct regmap_slimbus_paged_ctx *ctx,
 	int tries = REGMAP_SLIMBUS_PAGED_TRIES;
 	int ret;
 
-	if (ctx->current_page == page)
-		return 0;
-
 	do {
 		ret = slim_write(sdev, REGMAP_SLIMBUS_WCD_SELECTOR, 1, &page);
 		if (!ret || --tries == 0)
 			break;
 		usleep_range(slim_io_retry_us, slim_io_retry_us + 100);
 	} while (1);
-
-	if (!ret)
-		ctx->current_page = page;
-	else
-		ctx->current_page = -1;
 
 	return ret;
 }
@@ -138,10 +133,11 @@ static int regmap_slimbus_paged_write(void *context, const void *data,
 
 	/*
 	 * Writes to the page 0x0a TX decimator registers occasionally do not
-	 * reach the codec although slim_write() succeeds, because the selector
-	 * write did not take effect. Read them back and, on mismatch, re-select
-	 * the page and write again. Registers 0x0a31..0x0aff are readable and
-	 * not self-clearing, so this is safe for them.
+	 * reach the codec although slim_write() succeeds, because the ADSP
+	 * moved the selector between our selector write and the data write.
+	 * Read them back and, on mismatch, re-select the page and write again.
+	 * Registers 0x0a31..0x0aff are readable and not self-clearing, so this
+	 * is safe for them.
 	 */
 	if (!ret && (count - 2) == 1 && page == 0x0a && offset >= 0x31) {
 		u8 want = ((u8 *)data)[2];
@@ -151,7 +147,6 @@ static int regmap_slimbus_paged_write(void *context, const void *data,
 		while (vtries--) {
 			if (slim_read(sdev, hw_addr, 1, &got) == 0 && got == want)
 				break;
-			ctx->current_page = -1;
 			if (regmap_slimbus_select_page(ctx, page))
 				break;
 			slim_write(sdev, hw_addr, 1, (u8 *)data + 2);
@@ -234,7 +229,6 @@ struct regmap *__regmap_init_slimbus_paged(struct slim_device *slimbus,
 		return ERR_PTR(-ENOMEM);
 
 	ctx->sdev = slimbus;
-	ctx->current_page = -1;
 	mutex_init(&ctx->page_lock);
 
 	return __regmap_init(&slimbus->dev, &regmap_slimbus_paged_bus, ctx,
