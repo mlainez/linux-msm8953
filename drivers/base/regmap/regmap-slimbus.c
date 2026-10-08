@@ -132,14 +132,17 @@ static int regmap_slimbus_paged_write(void *context, const void *data,
 	} while (1);
 
 	/*
-	 * Writes to the page 0x0a TX decimator registers occasionally do not
-	 * reach the codec although slim_write() succeeds, because the ADSP
-	 * moved the selector between our selector write and the data write.
-	 * Read them back and, on mismatch, re-select the page and write again.
-	 * Registers 0x0a31..0x0aff are readable and not self-clearing, so this
-	 * is safe for them.
+	 * A write can still miss its register although slim_write() succeeds:
+	 * the ADSP may move the selector between our selector write and the
+	 * data write while it starts a SLIMbus port, which is exactly when
+	 * DAPM enables the mic bias, the EAR PA and the path clocks. Read
+	 * single-register writes back and, on mismatch, re-select the page and
+	 * write again. Page 0x00 (interrupt status/clear, efuse sensing) and
+	 * page 0x0a below the TX decimators hold write-to-clear and
+	 * self-clearing registers, so they are not verified.
 	 */
-	if (!ret && (count - 2) == 1 && page == 0x0a && offset >= 0x31) {
+	if (!ret && (count - 2) == 1 && page != 0x00 &&
+	    !(page == 0x0a && offset < 0x31)) {
 		u8 want = ((u8 *)data)[2];
 		u8 got = 0;
 		int vtries = 3;
@@ -152,9 +155,10 @@ static int regmap_slimbus_paged_write(void *context, const void *data,
 			slim_write(sdev, hw_addr, 1, (u8 *)data + 2);
 		}
 		/*
-		 * Not an error: some of these registers (e.g. 0x0aa7) reject
-		 * the write while the codec keeps working, and failing here
-		 * would make ASoC abort the DAPM update.
+		 * Not an error: some registers (e.g. 0x0aa7) reject the write,
+		 * and the codec changes clock-enable bits on its own, while it
+		 * keeps working. Failing here would make ASoC abort the DAPM
+		 * update.
 		 */
 		if (got != want)
 			dev_dbg(&sdev->dev,
