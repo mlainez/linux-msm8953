@@ -565,6 +565,36 @@ static int msm_routing_get_audio_mixer(struct snd_kcontrol *kcontrol,
 }
 
 static int msm_routing_put_audio_mixer(struct snd_kcontrol *kcontrol,
+				       struct snd_ctl_elem_value *ucontrol);
+
+/* Called with card->controls_rwsem held, as every put callback is. */
+static struct snd_kcontrol *msm_routing_find_mixer(struct snd_card *card,
+						   int be_id, int session_id)
+{
+	struct snd_kcontrol *kctl;
+
+	list_for_each_entry(kctl, &card->controls, list) {
+		struct soc_mixer_control *mc;
+
+		if (kctl->put != msm_routing_put_audio_mixer)
+			continue;
+		mc = (struct soc_mixer_control *)kctl->private_value;
+		if (mc->reg == be_id && mc->shift == session_id)
+			return kctl;
+	}
+
+	return NULL;
+}
+
+/*
+ * A session is routed to a single back end (session->port_id), so its
+ * mixer switches are mutually exclusive. DAPM must follow: switching a
+ * session to a new back end disconnects the old one's path, otherwise
+ * DPCM keeps starting the old back end with every stream while its
+ * switch reads as off. The new path is connected first so a running
+ * stream is never left without a back end.
+ */
+static int msm_routing_put_audio_mixer(struct snd_kcontrol *kcontrol,
 				       struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
@@ -576,19 +606,38 @@ static int msm_routing_put_audio_mixer(struct snd_kcontrol *kcontrol,
 	int be_id = mc->reg;
 	int session_id = mc->shift;
 	struct session_data *session = &data->sessions[session_id];
+	int old_be_id = session->port_id;
 
 	if (ucontrol->value.integer.value[0]) {
-		if (session->port_id == be_id)
+		if (old_be_id == be_id)
 			return 0;
 
 		session->port_id = be_id;
 		snd_soc_dapm_mixer_update_power(dapm, kcontrol, 1, update);
-	} else {
-		if (session->port_id == -1 || session->port_id != be_id)
-			return 0;
 
-		session->port_id = -1;
+		if (old_be_id != -1) {
+			struct snd_card *card = snd_soc_dapm_to_card(dapm)->snd_card;
+			struct snd_kcontrol *old;
+
+			old = msm_routing_find_mixer(card, old_be_id, session_id);
+			if (old) {
+				snd_soc_dapm_mixer_update_power(
+					snd_soc_dapm_kcontrol_to_dapm(old), old, 0,
+					NULL);
+				snd_ctl_notify(card, SNDRV_CTL_EVENT_MASK_VALUE,
+					       &old->id);
+			}
+		}
+	} else {
+		if (old_be_id == be_id)
+			session->port_id = -1;
+		/*
+		 * Disconnect even when the session already moved on, so
+		 * "off" always takes effect in DAPM.
+		 */
 		snd_soc_dapm_mixer_update_power(dapm, kcontrol, 0, update);
+		if (old_be_id != be_id)
+			return 0;
 	}
 
 	return 1;
