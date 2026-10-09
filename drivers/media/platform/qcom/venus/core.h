@@ -98,6 +98,7 @@ struct venus_resources {
 	u32 cp_nonpixel_start;
 	u32 cp_nonpixel_size;
 	const char *fwname;
+	bool no_codec_power_collapse;
 	const char *enc_nodename;
 	const char *dec_nodename;
 	const struct firmware_version *min_fw;

@@ -931,6 +931,11 @@ static const struct venus_resources msm8953_res = {
 	.cp_nonpixel_size = 0x24800000,
 	.dma_mask = 0xddc00000 - 1,
 	.fwname = "venus.mdt", /* FIXME */
+	/*
+	 * The codec hangs on the first frame after the firmware has
+	 * power-collapsed it between frames.
+	 */
+	.no_codec_power_collapse = true,
 };
 
 static const struct freq_tbl sc7180_freq_table[] = {
