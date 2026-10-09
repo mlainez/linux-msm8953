@@ -2123,7 +2123,10 @@
 			interrupts = <GIC_SPI 44 IRQ_TYPE_LEVEL_HIGH>;
 			iommus = <&apps_iommu 0x16>;
 			memory-region = <&venus_mem>;
-			power-domains = <&gcc VENUS_GDSC>;
+			operating-points-v2 = <&venus_opp_table>;
+			power-domains = <&gcc VENUS_GDSC>,
+					<&rpmpd MSM8953_VDDCX>;
+			power-domain-names = "venus", "cx";
 
 			video-decoder {
 				compatible = "venus-decoder";
