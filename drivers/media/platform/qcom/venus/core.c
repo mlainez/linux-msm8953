@@ -933,6 +933,7 @@ static const struct venus_resources msm8953_res = {
 	.vcodec1_clks = { "vcodec0_core" },
 	.vcodec_clks_num = 1,
 	.vcodec_num = 1,
+	.opp_pmdomain = (const char *[]) { "cx" },
 	.max_load = 1036800,
 	.hfi_version = HFI_VERSION_3XX,
 	.vmem_id = VIDC_RESOURCE_NONE,

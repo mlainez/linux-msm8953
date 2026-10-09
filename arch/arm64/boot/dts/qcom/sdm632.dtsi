@@ -135,6 +135,11 @@
 	power-domains = <&rpmpd SDM632_VDDCX>;
 };
 
+&venus {
+	power-domains = <&gcc VENUS_GDSC>,
+			<&rpmpd SDM632_VDDCX>;
+};
+
 &wcnss {
 	power-domains = <&rpmpd SDM632_VDDCX>,
 			<&rpmpd SDM632_VDDMX>;
