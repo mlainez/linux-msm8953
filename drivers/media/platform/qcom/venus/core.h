@@ -182,6 +182,9 @@ struct venus_format {
  * @dump_core:	a flag indicating that a core dump is required
  * @ocs:	OF changeset pointer
  * @hwmode_dev:	a flag indicating that HW_CTRL_TRIGGER is used in clock driver
+ * @core_rate:	the core clock rate last set
+ * @video_avg_bw:	the average bandwidth last voted on @video_path
+ * @video_peak_bw:	the peak bandwidth last voted on @video_path
  */
 struct venus_core {
 	void __iomem *base;
@@ -242,6 +245,9 @@ struct venus_core {
 	unsigned long dump_core;
 	struct of_changeset *ocs;
 	bool hwmode_dev;
+	unsigned long core_rate;
+	u32 video_avg_bw;
+	u32 video_peak_bw;
 };
 
 struct vdec_controls {

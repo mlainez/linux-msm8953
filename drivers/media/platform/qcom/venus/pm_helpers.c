@@ -91,6 +91,14 @@ static int core_clks_set_rate(struct venus_core *core, unsigned long freq)
 {
 	int ret;
 
+	/*
+	 * The load is rescaled for every queued frame. Setting a rate the
+	 * clock cannot hit exactly reprograms it each time, and votes the
+	 * performance state again with it.
+	 */
+	if (freq == core->core_rate)
+		return 0;
+
 	ret = dev_pm_opp_set_rate(core->dev, freq);
 	if (ret)
 		return ret;
@@ -102,6 +110,8 @@ static int core_clks_set_rate(struct venus_core *core, unsigned long freq)
 	ret = clk_set_rate(core->vcodec1_clks[0], freq);
 	if (ret)
 		return ret;
+
+	core->core_rate = freq;
 
 	return 0;
 }
@@ -222,6 +232,7 @@ static int load_scale_bw(struct venus_core *core)
 {
 	struct venus_inst *inst = NULL;
 	u32 mbs_per_sec, avg, peak, total_avg = 0, total_peak = 0;
+	int ret;
 
 	list_for_each_entry(inst, &core->instances, list) {
 		mbs_per_sec = load_per_instance(inst);
@@ -240,10 +251,20 @@ static int load_scale_bw(struct venus_core *core)
 	if (!total_avg && !total_peak)
 		total_avg = kbps_to_icc(1000);
 
+	if (total_avg == core->video_avg_bw && total_peak == core->video_peak_bw)
+		return 0;
+
 	dev_dbg(core->dev, VDBGL "total: avg_bw: %u, peak_bw: %u\n",
 		total_avg, total_peak);
 
-	return icc_set_bw(core->video_path, total_avg, total_peak);
+	ret = icc_set_bw(core->video_path, total_avg, total_peak);
+	if (ret)
+		return ret;
+
+	core->video_avg_bw = total_avg;
+	core->video_peak_bw = total_peak;
+
+	return 0;
 }
 
 static int load_scale_v1(struct venus_inst *inst)
