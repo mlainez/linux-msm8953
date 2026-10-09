@@ -899,6 +899,19 @@ static const struct venus_resources sdm845_res_v2 = {
 	.enc_nodename = "video-core1",
 };
 
+/*
+ * The core clock rates of the SoC, each with the load it carries at the
+ * 863 cycles per macroblock an encode costs.
+ */
+static const struct freq_tbl msm8953_freq_table[] = {
+	{ 538818, 465000000 },
+	{ 463499, 400000000 },
+	{ 417149, 360000000 },
+	{ 359212, 310000000 },
+	{ 264855, 228570000 },
+	{ 132433, 114290000 },
+};
+
 static const struct reg_val msm8953_reg_preset[] = {
 	{ 0xe0020, 0x05555556 },
 	{ 0xe0024, 0x05555556 },
@@ -906,8 +919,8 @@ static const struct reg_val msm8953_reg_preset[] = {
 };
 
 static const struct venus_resources msm8953_res = {
-	.freq_tbl = sdm660_freq_table, /* FIXME */
-	.freq_tbl_size = ARRAY_SIZE(sdm660_freq_table),
+	.freq_tbl = msm8953_freq_table,
+	.freq_tbl_size = ARRAY_SIZE(msm8953_freq_table),
 	.reg_tbl = msm8953_reg_preset,
 	.reg_tbl_size = ARRAY_SIZE(msm8953_reg_preset),
 	.bw_tbl_enc = sdm660_bw_table_enc,
