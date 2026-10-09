@@ -960,7 +960,8 @@ static int venus_sys_set_default_properties(struct venus_hfi_device *hdev)
 			dev_warn(dev, "setting idle response ON failed (%d)\n", ret);
 	}
 
-	ret = venus_sys_set_power_control(hdev, venus_fw_low_power_mode);
+	ret = venus_sys_set_power_control(hdev, venus_fw_low_power_mode &&
+					  !res->no_codec_power_collapse);
 	if (ret)
 		dev_warn(dev, "setting hw power collapse ON failed (%d)\n",
 			 ret);
