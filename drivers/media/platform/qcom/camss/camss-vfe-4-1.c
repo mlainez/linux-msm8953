@@ -726,45 +726,50 @@ static void vfe_set_rgb_lut(struct vfe_device *vfe)
 }
 
 /*
- * Colour correction under D50 from the Qualcomm calibration of the
- * Fairphone 3 and 3+ sensors, Q7, rows and columns in the hardware's G,
- * B, R order. Other sensors get none.
+ * Black level in the 12-bit pipeline, and colour correction under D50
+ * from the Qualcomm calibration of the Fairphone 3 and 3+ sensors, Q7,
+ * rows and columns in the hardware's G, B, R order. The S5K4H7YX driver
+ * programs a pedestal of 128 in 10-bit units. Other sensors get a black
+ * level of 64 in 10-bit units and no colour correction.
  */
-static const struct {
+static const struct vfe_sensor_cal {
 	const char *model;
+	u16 black;
 	s16 ccm[9];
-} vfe_sensor_ccm[] = {
-	{ "s5kgm1sp", { 188, -36, -24, -91, 211, 8, -55, -20, 203 } },
-	{ "s5k3p9sp", { 195, -40, -27, -91, 208, 10, -45, -20, 193 } },
-	{ "imx363", { 218, -55, -35, -90, 217, 1, -57, -30, 215 } },
-	{ "s5k4h7yx", { 171, -17, -26, -129, 256, 1, -117, 18, 227 } },
+} vfe_sensor_cal[] = {
+	{ "s5kgm1sp", 257, { 188, -36, -24, -91, 211, 8, -55, -20, 203 } },
+	{ "s5k3p9sp", 257, { 195, -40, -27, -91, 208, 10, -45, -20, 193 } },
+	{ "imx363", 256, { 218, -55, -35, -90, 217, 1, -57, -30, 215 } },
+	{ "s5k4h7yx", 512, { 171, -17, -26, -129, 256, 1, -117, 18, 227 } },
 };
 
-static const s16 vfe_ccm_identity[9] = { 128, 0, 0, 0, 128, 0, 0, 0, 128 };
+static const struct vfe_sensor_cal vfe_sensor_cal_default = {
+	.black = 257,
+	.ccm = { 128, 0, 0, 0, 128, 0, 0, 0, 128 },
+};
 
-static const s16 *vfe_sensor_ccm_of(struct vfe_line *line)
+static const struct vfe_sensor_cal *vfe_sensor_cal_of(struct vfe_line *line)
 {
 	struct media_pad *pad = camss_find_sensor_pad(&line->subdev.entity);
 	unsigned int i;
 
-	for (i = 0; pad && i < ARRAY_SIZE(vfe_sensor_ccm); i++)
-		if (!strncmp(pad->entity->name, vfe_sensor_ccm[i].model,
-			     strlen(vfe_sensor_ccm[i].model)))
-			return vfe_sensor_ccm[i].ccm;
+	for (i = 0; pad && i < ARRAY_SIZE(vfe_sensor_cal); i++)
+		if (!strncmp(pad->entity->name, vfe_sensor_cal[i].model,
+			     strlen(vfe_sensor_cal[i].model)))
+			return &vfe_sensor_cal[i];
 
-	return vfe_ccm_identity;
+	return &vfe_sensor_cal_default;
 }
-
-/* Sensor black level in the 12-bit pipeline */
-#define VFE_BLACK_LEVEL		257
 
 /*
  * The colour correction offsets take the black level out ahead of the
  * gamma curve: the pedestal has been through the white balance gains by
  * then, and the matrix mixes the channels.
  */
-static void vfe_write_ccm(struct vfe_device *vfe, const s16 *ccm, const u32 gains[3])
+static void vfe_write_ccm(struct vfe_device *vfe, const struct vfe_sensor_cal *cal,
+			  const u32 gains[3])
 {
+	const s16 *ccm = cal->ccm;
 	unsigned int i, j;
 
 	for (i = 0; i < 9; i++)
@@ -774,7 +779,7 @@ static void vfe_write_ccm(struct vfe_device *vfe, const s16 *ccm, const u32 gain
 		s32 offset = 0;
 
 		for (j = 0; j < 3; j++)
-			offset -= ccm[i * 3 + j] * (s32)(VFE_BLACK_LEVEL * gains[j] / 128);
+			offset -= ccm[i * 3 + j] * (s32)(cal->black * gains[j] / 128);
 		offset /= 128;
 		writel_relaxed(clamp(offset, -1024, 1023) & 0x7ff, vfe->base + VFE_0_CC_OFFSET(i));
 	}
@@ -788,7 +793,7 @@ static void vfe_write_wb_gains(struct vfe_device *vfe, struct vfe_line *line)
 	const u32 gains[3] = { g, b, r };
 
 	writel_relaxed(g | b << 9 | r << 18, vfe->base + VFE_0_WB_CFG);
-	vfe_write_ccm(vfe, line->ccm, gains);
+	vfe_write_ccm(vfe, line->cal, gains);
 
 	/* Demosaic interpolates with the same ratios to green */
 	writel_relaxed(r | b << 15, vfe->base + VFE_0_DEMOSAIC_WB_GAIN_0);
@@ -806,7 +811,7 @@ static void vfe_set_bayer_cfg(struct vfe_device *vfe, struct vfe_line *line)
 {
 	unsigned int i;
 
-	line->ccm = vfe_sensor_ccm_of(line);
+	line->cal = vfe_sensor_cal_of(line);
 
 	for (i = 0; i < ARRAY_SIZE(vfe_bayer_cfg); i++)
 		writel_relaxed(vfe_bayer_cfg[i].value,
