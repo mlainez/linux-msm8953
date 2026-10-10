@@ -13,6 +13,7 @@
 #include <linux/clk.h>
 #include <linux/spinlock_types.h>
 #include <media/media-entity.h>
+#include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-subdev.h>
 
@@ -94,6 +95,12 @@ struct vfe_line {
 	struct vfe_output output;
 	const struct camss_format_info *formats;
 	unsigned int nformats;
+	struct v4l2_ctrl_handler ctrls;
+	/* White balance gains of a debayering pixel line, Q7 */
+	u16 wb_red;
+	u16 wb_blue;
+	/* Its sensor's colour correction matrix */
+	const s16 *ccm;
 };
 
 struct vfe_device;
@@ -120,6 +127,7 @@ struct vfe_hw_ops {
 	void (*vfe_buf_done)(struct vfe_device *vfe, int port_id);
 	void (*vfe_wm_update)(struct vfe_device *vfe, u8 wm, u32 addr,
 			      struct vfe_line *line);
+	void (*set_wb_gains)(struct vfe_device *vfe, struct vfe_line *line);
 };
 
 struct vfe_isr_ops {
