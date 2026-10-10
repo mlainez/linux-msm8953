@@ -18,6 +18,7 @@
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
+#include <linux/unaligned.h>
 #include <media/v4l2-cci.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
@@ -544,6 +545,63 @@ static int s5k3p9sp_get_selection(struct v4l2_subdev *sd,
 	return -EINVAL;
 }
 
+/*
+ * The sensor's indirect data port: each write to it stores a word at the
+ * address set through 0x602a and advances that address, so a run of
+ * writes to it can go out as one burst.
+ */
+#define S5K3P9SP_REG_DATA_PORT		CCI_REG16(0x6f12)
+#define S5K3P9SP_BURST_WORDS		32
+
+/*
+ * Write a register table, sending runs of data port writes as bursts as
+ * long as the I2C adapter takes. Uploading the setfile one word per
+ * transfer takes most of a second.
+ */
+static int s5k3p9sp_write_table(struct s5k3p9sp *sensor,
+			       const struct cci_reg_sequence *regs,
+			       unsigned int num)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(&sensor->sd);
+	const struct i2c_adapter_quirks *quirks = client->adapter->quirks;
+	u8 buf[2 + S5K3P9SP_BURST_WORDS * 2];
+	unsigned int max = sizeof(buf);
+	unsigned int i = 0;
+	int ret;
+
+	if (quirks && quirks->max_write_len)
+		max = min_t(unsigned int, max, quirks->max_write_len);
+
+	while (i < num) {
+		unsigned int len = 2;
+
+		if (regs[i].reg != S5K3P9SP_REG_DATA_PORT || max < 4) {
+			ret = cci_write(sensor->regmap, regs[i].reg, regs[i].val,
+					NULL);
+			if (ret)
+				return ret;
+			i++;
+			continue;
+		}
+
+		put_unaligned_be16(S5K3P9SP_REG_DATA_PORT & 0xffff, buf);
+		while (i < num && regs[i].reg == S5K3P9SP_REG_DATA_PORT &&
+		       len + 2 <= max) {
+			put_unaligned_be16(regs[i].val, buf + len);
+			len += 2;
+			i++;
+		}
+
+		ret = i2c_master_send(client, buf, len);
+		if (ret < 0)
+			return ret;
+		if (ret != len)
+			return -EIO;
+	}
+
+	return 0;
+}
+
 static int s5k3p9sp_start_streaming(struct s5k3p9sp *sensor)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(&sensor->sd);
@@ -558,8 +616,8 @@ static int s5k3p9sp_start_streaming(struct s5k3p9sp *sensor)
 	}
 	fsleep(3000);
 
-	ret = cci_multi_reg_write(sensor->regmap, &s5k3p9sp_init_regs[2],
-				  ARRAY_SIZE(s5k3p9sp_init_regs) - 2, NULL);
+	ret = s5k3p9sp_write_table(sensor, &s5k3p9sp_init_regs[2],
+				   ARRAY_SIZE(s5k3p9sp_init_regs) - 2);
 	if (ret) {
 		dev_err(&client->dev, "failed to write init regs\n");
 		return ret;
@@ -568,8 +626,8 @@ static int s5k3p9sp_start_streaming(struct s5k3p9sp *sensor)
 	fsleep(sensor->cur_mode->pre_stream_delay_us);
 
 	reg_list = &sensor->cur_mode->reg_list;
-	ret = cci_multi_reg_write(sensor->regmap, reg_list->regs,
-				  reg_list->num_of_regs, NULL);
+	ret = s5k3p9sp_write_table(sensor, reg_list->regs,
+				   reg_list->num_of_regs);
 	if (ret) {
 		dev_err(&client->dev, "failed to write mode regs\n");
 		return ret;
