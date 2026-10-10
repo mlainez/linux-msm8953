@@ -241,12 +241,10 @@
 #define MSM_VFE_VFE0_UB_SIZE 1023
 #define MSM_VFE_VFE0_UB_SIZE_RDI (MSM_VFE_VFE0_UB_SIZE / 3)
 
+/* Each VFE has its own UB: msm8953 has two of the same size */
 static u16 vfe_get_ub_size(u8 vfe_id)
 {
-	if (vfe_id == 0)
-		return MSM_VFE_VFE0_UB_SIZE_RDI;
-
-	return 0;
+	return MSM_VFE_VFE0_UB_SIZE_RDI;
 }
 
 static inline void vfe_reg_clr(struct vfe_device *vfe, u32 reg, u32 clr_bits)
