@@ -152,9 +152,17 @@ static void vfe_output_frame_drop(struct vfe_device *vfe,
 	u8 drop_period;
 	unsigned int i;
 
-	/* We need to toggle update period to be valid on next frame */
-	output->drop_update_idx++;
-	output->drop_update_idx %= VFE_FRAME_DROP_UPDATES;
+	/*
+	 * A new period restarts the drop pattern on the next frame. Toggle it
+	 * once per register update: toggled twice before the hardware latches
+	 * it, the period is unchanged, and the write master then waits for the
+	 * pattern counter to wrap, a whole period of frames.
+	 */
+	if (!output->gen1.drop_update_pending) {
+		output->drop_update_idx++;
+		output->drop_update_idx %= VFE_FRAME_DROP_UPDATES;
+		output->gen1.drop_update_pending = 1;
+	}
 	drop_period = VFE_FRAME_DROP_VAL + output->drop_update_idx;
 
 	for (i = 0; i < output->wm_num; i++) {
@@ -194,6 +202,7 @@ static int vfe_enable_output(struct vfe_line *line)
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
 	ops->reg_update_clear(vfe, line->id);
+	output->gen1.drop_update_pending = 0;
 
 	if (output->state > VFE_OUTPUT_RESERVED) {
 		dev_err(vfe->camss->dev, "Output is not in reserved state %d\n", output->state);
@@ -549,6 +558,7 @@ static void vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
 	vfe->res->hw_ops->reg_update_clear(vfe, line_id);
 
 	output = &line->output;
+	output->gen1.drop_update_pending = 0;
 
 	if (output->wait_reg_update) {
 		output->wait_reg_update = 0;
