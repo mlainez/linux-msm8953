@@ -659,6 +659,18 @@ static void ispif_config_irq(struct ispif_device *ispif, enum ispif_intf intf,
 
 	switch (intf) {
 	case PIX0:
+		/*
+		 * The line buffer lets the pixel interface take a line as
+		 * fast as the sensor sends it; without it the interface
+		 * overflows and the VFE never sees the end of the frame.
+		 */
+		val = readl_relaxed(ispif->base + ISPIF_VFE_m_CTRL_0(vfe));
+		if (enable)
+			val |= ISPIF_VFE_m_CTRL_0_PIX0_LINE_BUF_EN;
+		else
+			val &= ~ISPIF_VFE_m_CTRL_0_PIX0_LINE_BUF_EN;
+		writel_relaxed(val, ispif->base + ISPIF_VFE_m_CTRL_0(vfe));
+
 		val = readl_relaxed(ispif->base + ISPIF_VFE_m_IRQ_MASK_0(vfe));
 		val &= ~ISPIF_VFE_m_IRQ_MASK_0_PIX0_MASK;
 		if (enable)

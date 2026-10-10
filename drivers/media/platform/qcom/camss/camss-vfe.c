@@ -284,10 +284,79 @@ const struct camss_formats vfe_formats_pix_845 = {
 	.formats = formats_rdi_845
 };
 
+/*
+ * The msm8953 pixel path debayers GRBG 10-bit frames to NV12 with a fixed
+ * pipeline.
+ */
+static bool vfe_pix_debayers(struct vfe_line *line, u32 code)
+{
+	struct vfe_device *vfe = to_vfe(line);
+
+	return line->id == VFE_LINE_PIX &&
+	       vfe->camss->res->version == CAMSS_8x53 &&
+	       code == MEDIA_BUS_FMT_SGRBG10_1X10;
+}
+
+static int vfe_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct vfe_line *line = container_of(ctrl->handler, struct vfe_line, ctrls);
+	struct vfe_device *vfe = to_vfe(line);
+	unsigned long flags;
+
+	switch (ctrl->id) {
+	case V4L2_CID_RED_BALANCE:
+		line->wb_red = ctrl->val;
+		break;
+	case V4L2_CID_BLUE_BALANCE:
+		line->wb_blue = ctrl->val;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	/* A stopped line is unclocked; the gains apply when it starts */
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	if (line->output.state > VFE_OUTPUT_RESERVED)
+		vfe->res->hw_ops->set_wb_gains(vfe, line);
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	return 0;
+}
+
+static const struct v4l2_ctrl_ops vfe_ctrl_ops = {
+	.s_ctrl = vfe_s_ctrl,
+};
+
+/* White balance controls of a pixel line that debayers, Q7 gains */
+static int vfe_init_ctrls(struct vfe_line *line)
+{
+	struct v4l2_ctrl_handler *hdl = &line->ctrls;
+
+	line->wb_red = 128;
+	line->wb_blue = 128;
+
+	v4l2_ctrl_handler_init(hdl, 2);
+	v4l2_ctrl_new_std(hdl, &vfe_ctrl_ops, V4L2_CID_RED_BALANCE, 32, 511, 1, 128);
+	v4l2_ctrl_new_std(hdl, &vfe_ctrl_ops, V4L2_CID_BLUE_BALANCE, 32, 511, 1, 128);
+	if (hdl->error) {
+		int ret = hdl->error;
+
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
+
+	line->subdev.ctrl_handler = hdl;
+
+	return 0;
+}
+
 static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
 			    unsigned int index, u32 src_req_code)
 {
 	struct vfe_device *vfe = to_vfe(line);
+
+	if (vfe_pix_debayers(line, sink_code))
+		return index > 0 ? 0 : MEDIA_BUS_FMT_YUYV8_1_5X8;
 
 	switch (vfe->camss->res->version) {
 	case CAMSS_8x16:
@@ -987,6 +1056,7 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 		struct camss_clock *clock = &vfe->clock[i];
 
 		if (vfe_match_clock_names(vfe, clock) && vfe_check_clock_levels(clock)) {
+			bool top_rate = false;
 			u64 min_rate = 0;
 			long rate;
 
@@ -997,6 +1067,16 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 
 				if (!pixel_clock[j])
 					continue;
+
+				/*
+				 * The pixel path debayers one pixel per clock,
+				 * and a binned sensor line arrives faster than
+				 * any lower level drains it.
+				 */
+				if (vfe_pix_debayers(l, l->fmt[MSM_VFE_PAD_SINK].code)) {
+					top_rate = true;
+					continue;
+				}
 
 				bpp = camss_format_get_bpp(l->formats,
 						l->nformats,
@@ -1026,7 +1106,7 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 				if (min_rate < clock->freq[j])
 					break;
 
-			if (j == clock->nfreqs) {
+			if (j == clock->nfreqs && !top_rate) {
 				dev_err(dev,
 					"Pixel clock is too high for VFE");
 				return -EINVAL;
@@ -1034,7 +1114,7 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 
 			/* if sensor pixel clock is not available */
 			/* set highest possible VFE clock rate */
-			if (min_rate == 0)
+			if (min_rate == 0 || top_rate)
 				j = clock->nfreqs - 1;
 
 			rate = clk_round_rate(clock->clk, clock->freq[j]);
@@ -1088,6 +1168,10 @@ static int vfe_check_clock_rates(struct vfe_device *vfe)
 				u8 bpp;
 
 				if (!pixel_clock[j])
+					continue;
+
+				/* Debayering runs at the top rate */
+				if (vfe_pix_debayers(l, l->fmt[MSM_VFE_PAD_SINK].code))
 					continue;
 
 				bpp = camss_format_get_bpp(l->formats,
@@ -1438,7 +1522,7 @@ static void vfe_try_format(struct vfe_line *line,
 				break;
 
 		/* If not found, use UYVY as default */
-		if (i >= line->nformats)
+		if (i >= line->nformats && !vfe_pix_debayers(line, fmt->code))
 			fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
 
 		fmt->width = clamp_t(u32, fmt->width, 1, 8191);
@@ -2152,6 +2236,12 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 
 		v4l2_set_subdevdata(sd, &vfe->line[i]);
 
+		if (i == VFE_LINE_PIX && vfe->res->hw_ops->set_wb_gains) {
+			ret = vfe_init_ctrls(&vfe->line[i]);
+			if (ret < 0)
+				goto error_init;
+		}
+
 		ret = vfe_init_formats(sd, NULL);
 		if (ret < 0) {
 			dev_err(dev, "Failed to init format: %d\n", ret);
@@ -2250,6 +2340,7 @@ void msm_vfe_unregister_entities(struct vfe_device *vfe)
 		msm_video_unregister(video_out);
 		v4l2_device_unregister_subdev(sd);
 		media_entity_cleanup(&sd->entity);
+		v4l2_ctrl_handler_free(&vfe->line[i].ctrls);
 	}
 }
 
