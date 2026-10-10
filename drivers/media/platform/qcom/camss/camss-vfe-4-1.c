@@ -727,8 +727,8 @@ static void vfe_set_rgb_lut(struct vfe_device *vfe)
 
 /*
  * Colour correction under D50 from the Qualcomm calibration of the
- * Fairphone 3+ sensors, Q7, rows and columns in the hardware's G, B, R
- * order. Other sensors get none.
+ * Fairphone 3 and 3+ sensors, Q7, rows and columns in the hardware's G,
+ * B, R order. Other sensors get none.
  */
 static const struct {
 	const char *model;
@@ -736,6 +736,8 @@ static const struct {
 } vfe_sensor_ccm[] = {
 	{ "s5kgm1sp", { 188, -36, -24, -91, 211, 8, -55, -20, 203 } },
 	{ "s5k3p9sp", { 195, -40, -27, -91, 208, 10, -45, -20, 193 } },
+	{ "imx363", { 218, -55, -35, -90, 217, 1, -57, -30, 215 } },
+	{ "s5k4h7yx", { 171, -17, -26, -129, 256, 1, -117, 18, 227 } },
 };
 
 static const s16 vfe_ccm_identity[9] = { 128, 0, 0, 0, 128, 0, 0, 0, 128 };
