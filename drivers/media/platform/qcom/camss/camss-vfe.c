@@ -1003,6 +1003,7 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 		struct camss_clock *clock = &vfe->clock[i];
 
 		if (vfe_match_clock_names(vfe, clock) && vfe_check_clock_levels(clock)) {
+			bool top_rate = false;
 			u64 min_rate = 0;
 			long rate;
 
@@ -1013,6 +1014,16 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 
 				if (!pixel_clock[j])
 					continue;
+
+				/*
+				 * The pixel path debayers one pixel per clock,
+				 * and a binned sensor line arrives faster than
+				 * any lower level drains it.
+				 */
+				if (vfe_pix_debayers(l, l->fmt[MSM_VFE_PAD_SINK].code)) {
+					top_rate = true;
+					continue;
+				}
 
 				bpp = camss_format_get_bpp(l->formats,
 						l->nformats,
@@ -1042,7 +1053,7 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 				if (min_rate < clock->freq[j])
 					break;
 
-			if (j == clock->nfreqs) {
+			if (j == clock->nfreqs && !top_rate) {
 				dev_err(dev,
 					"Pixel clock is too high for VFE");
 				return -EINVAL;
@@ -1050,7 +1061,7 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 
 			/* if sensor pixel clock is not available */
 			/* set highest possible VFE clock rate */
-			if (min_rate == 0)
+			if (min_rate == 0 || top_rate)
 				j = clock->nfreqs - 1;
 
 			rate = clk_round_rate(clock->clk, clock->freq[j]);
@@ -1104,6 +1115,10 @@ static int vfe_check_clock_rates(struct vfe_device *vfe)
 				u8 bpp;
 
 				if (!pixel_clock[j])
+					continue;
+
+				/* Debayering runs at the top rate */
+				if (vfe_pix_debayers(l, l->fmt[MSM_VFE_PAD_SINK].code))
 					continue;
 
 				bpp = camss_format_get_bpp(l->formats,
