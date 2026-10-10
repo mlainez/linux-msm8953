@@ -33,10 +33,16 @@
 #define VFE_0_MODULE_CFG		0x018
 #define VFE_0_MODULE_CFG_DEMUX			BIT(2)
 #define VFE_0_MODULE_CFG_CHROMA_UPSAMPLE	BIT(3)
+#define VFE_0_MODULE_CFG_DEMOSAIC		BIT(4)
+#define VFE_0_MODULE_CFG_WB			BIT(11)
+#define VFE_0_MODULE_CFG_COLOR_CORRECT		BIT(13)
+#define VFE_0_MODULE_CFG_CHROMA_ENHANCE		BIT(17)
+#define VFE_0_MODULE_CFG_COLOR_XFORM_ENC	BIT(21)
 #define VFE_0_MODULE_CFG_SCALE_ENC		BIT(23)
 #define VFE_0_MODULE_CFG_CROP_ENC		BIT(27)
 
 #define VFE_0_CORE_CFG			0x01c
+#define VFE_0_CORE_CFG_PIXEL_PATTERN_GRGRGR	0x1
 #define VFE_0_CORE_CFG_PIXEL_PATTERN_YCBYCR	0x4
 #define VFE_0_CORE_CFG_PIXEL_PATTERN_YCRYCB	0x5
 #define VFE_0_CORE_CFG_PIXEL_PATTERN_CBYCRY	0x6
@@ -166,16 +172,23 @@
 #define VFE_0_DEMUX_GAIN_1			0x42c
 #define VFE_0_DEMUX_GAIN_1_CH1			(0x80 << 0)
 #define VFE_0_DEMUX_GAIN_1_CH2			(0x80 << 16)
+#define VFE_0_DEMUX_R_GAIN_0			0x430
+#define VFE_0_DEMUX_R_GAIN_1			0x434
 #define VFE_0_DEMUX_EVEN_CFG			0x438
+#define VFE_0_DEMUX_EVEN_CFG_PATTERN_GRBG	0x9c
 #define VFE_0_DEMUX_EVEN_CFG_PATTERN_YUYV	0x9cac
 #define VFE_0_DEMUX_EVEN_CFG_PATTERN_YVYU	0xac9c
 #define VFE_0_DEMUX_EVEN_CFG_PATTERN_UYVY	0xc9ca
 #define VFE_0_DEMUX_EVEN_CFG_PATTERN_VYUY	0xcac9
 #define VFE_0_DEMUX_ODD_CFG			0x43c
+#define VFE_0_DEMUX_ODD_CFG_PATTERN_GRBG	0xca
 #define VFE_0_DEMUX_ODD_CFG_PATTERN_YUYV	0x9cac
 #define VFE_0_DEMUX_ODD_CFG_PATTERN_YVYU	0xac9c
 #define VFE_0_DEMUX_ODD_CFG_PATTERN_UYVY	0xc9ca
 #define VFE_0_DEMUX_ODD_CFG_PATTERN_VYUY	0xcac9
+
+#define VFE_0_STATS_CFG				0x888
+#define VFE_0_STATS_CFG_COLOR_CONV_EN		BIT(0)
 
 #define VFE_0_SCALE_ENC_Y_CFG			0x75c
 #define VFE_0_SCALE_ENC_Y_H_IMAGE_SIZE		0x760
@@ -594,9 +607,93 @@ static void vfe_enable_irq_common(struct vfe_device *vfe)
 	vfe_reg_set(vfe, VFE_0_IRQ_MASK_1, irq_en1);
 }
 
+static bool vfe_is_bayer(struct vfe_line *line)
+{
+	return line->fmt[MSM_VFE_PAD_SINK].code == MEDIA_BUS_FMT_SGRBG10_1X10;
+}
+
+/*
+ * Fixed Bayer pipeline: demosaic with its default interpolation
+ * classifier, unity white balance, identity colour correction and full
+ * range BT.601 RGB to YCbCr conversion, ahead of the encoder scaler.
+ */
+static const struct {
+	u16 offset;
+	u32 value;
+} vfe_bayer_cfg[] = {
+	{ 0x440, 0x00000000 },	/* demosaic: BPC, BCC and ABF off */
+	{ 0x518, 0x00400080 },	/* demosaic WB ratios r/g, b/g: 1.0 */
+	{ 0x51c, 0x00400080 },	/* demosaic WB ratios g/r, g/b: 1.0 */
+	{ 0x520, 0x80003066 }, { 0x524, 0x81003066 }, { 0x528, 0x82003066 },
+	{ 0x52c, 0x83003066 }, { 0x530, 0x84003066 }, { 0x534, 0x85003066 },
+	{ 0x538, 0x86003066 }, { 0x53c, 0x87003066 }, { 0x540, 0x88003066 },
+	{ 0x544, 0x803fe066 }, { 0x548, 0x813fe066 }, { 0x54c, 0x823fe066 },
+	{ 0x550, 0x833fe066 }, { 0x554, 0x843fe066 }, { 0x558, 0x853fe066 },
+	{ 0x55c, 0x863fe066 }, { 0x560, 0x873fe066 }, { 0x564, 0x883fe066 },
+	{ 0x568, 0x0080ff00 },	/* demosaic interpolation, green */
+	{ 0x56c, 0x0001a020 },
+	{ 0x580, 0x02010080 },	/* white balance G, B, R: 1.0 */
+	{ 0x5d0, 0x080 }, { 0x5d4, 0 }, { 0x5d8, 0 },	/* colour correction: */
+	{ 0x5dc, 0 }, { 0x5e0, 0x080 }, { 0x5e4, 0 },	/* identity, Q7 */
+	{ 0x5e8, 0 }, { 0x5ec, 0 }, { 0x5f0, 0x080 },
+	{ 0x5f4, 0 }, { 0x5f8, 0 }, { 0x5fc, 0 }, { 0x600, 0 },
+	{ 0x640, 0x04d },	/* RGB to Y: 0.299, 0.587, 0.114 in Q8 */
+	{ 0x644, 0x096 },
+	{ 0x648, 0x01d },
+	{ 0x64c, 0x000 },
+	{ 0x650, 0x00800080 },	/* chroma: a = 0.5 */
+	{ 0x654, 0x0fa90fa9 },	/* b = -0.338 */
+	{ 0x658, 0x00800080 },	/* c = 0.5 */
+	{ 0x65c, 0x0fd70fd7 },	/* d = -0.162 */
+	{ 0x660, 0x00800080 },	/* Cb and Cr offsets: 128 */
+	{ 0x71c, 0x00000400 },	/* encoder colour transform: identity */
+	{ 0x720, 0x00000000 },
+	{ 0x724, 0x04000000 },
+	{ 0x728, 0x00000000 },
+	{ 0x72c, 0x00000000 },
+	{ 0x730, 0x00000400 },
+	{ 0x734, 0x00ffffff },
+	{ 0x738, 0x00000000 },
+};
+
+static void vfe_set_bayer_cfg(struct vfe_device *vfe)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(vfe_bayer_cfg); i++)
+		writel_relaxed(vfe_bayer_cfg[i].value,
+			       vfe->base + vfe_bayer_cfg[i].offset);
+
+	writel_relaxed(VFE_0_MODULE_CFG_DEMUX | VFE_0_MODULE_CFG_DEMOSAIC |
+		       VFE_0_MODULE_CFG_WB | VFE_0_MODULE_CFG_COLOR_CORRECT |
+		       VFE_0_MODULE_CFG_CHROMA_ENHANCE |
+		       VFE_0_MODULE_CFG_COLOR_XFORM_ENC |
+		       VFE_0_MODULE_CFG_SCALE_ENC | VFE_0_MODULE_CFG_CROP_ENC,
+		       vfe->base + VFE_0_MODULE_CFG);
+	vfe_reg_set(vfe, VFE_0_STATS_CFG, VFE_0_STATS_CFG_COLOR_CONV_EN);
+}
+
 static void vfe_set_demux_cfg(struct vfe_device *vfe, struct vfe_line *line)
 {
 	u32 val, even_cfg, odd_cfg;
+
+	if (vfe_is_bayer(line)) {
+		writel_relaxed(1, vfe->base + VFE_0_DEMUX_CFG);
+		val = VFE_0_DEMUX_GAIN_0_CH0_EVEN | VFE_0_DEMUX_GAIN_0_CH0_ODD;
+		writel_relaxed(val, vfe->base + VFE_0_DEMUX_GAIN_0);
+		writel_relaxed(val, vfe->base + VFE_0_DEMUX_R_GAIN_0);
+		val = VFE_0_DEMUX_GAIN_1_CH1 | VFE_0_DEMUX_GAIN_1_CH2;
+		writel_relaxed(val, vfe->base + VFE_0_DEMUX_GAIN_1);
+		writel_relaxed(val, vfe->base + VFE_0_DEMUX_R_GAIN_1);
+		writel_relaxed(VFE_0_DEMUX_EVEN_CFG_PATTERN_GRBG,
+			       vfe->base + VFE_0_DEMUX_EVEN_CFG);
+		writel_relaxed(VFE_0_DEMUX_ODD_CFG_PATTERN_GRBG,
+			       vfe->base + VFE_0_DEMUX_ODD_CFG);
+
+		/* The rest of the Bayer pipeline follows the demux */
+		vfe_set_bayer_cfg(vfe);
+		return;
+	}
 
 	writel_relaxed(VFE_0_DEMUX_CFG_PERIOD, vfe->base + VFE_0_DEMUX_CFG);
 
@@ -776,9 +873,13 @@ static void vfe_set_cgc_override(struct vfe_device *vfe, u8 wm, u8 enable)
 
 static void vfe_set_camif_cfg(struct vfe_device *vfe, struct vfe_line *line)
 {
+	unsigned int pixel_samples;
 	u32 val;
 
 	switch (line->fmt[MSM_VFE_PAD_SINK].code) {
+	case MEDIA_BUS_FMT_SGRBG10_1X10:
+		val = VFE_0_CORE_CFG_PIXEL_PATTERN_GRGRGR;
+		break;
 	case MEDIA_BUS_FMT_YUYV8_1X16:
 		val = VFE_0_CORE_CFG_PIXEL_PATTERN_YCBYCR;
 		break;
@@ -796,11 +897,14 @@ static void vfe_set_camif_cfg(struct vfe_device *vfe, struct vfe_line *line)
 
 	writel_relaxed(val, vfe->base + VFE_0_CORE_CFG);
 
-	val = line->fmt[MSM_VFE_PAD_SINK].width * 2;
+	/* CAMIF counts samples: two per YUV pixel, one per Bayer pixel */
+	pixel_samples = vfe_is_bayer(line) ? 1 : 2;
+
+	val = line->fmt[MSM_VFE_PAD_SINK].width * pixel_samples;
 	val |= line->fmt[MSM_VFE_PAD_SINK].height << 16;
 	writel_relaxed(val, vfe->base + VFE_0_CAMIF_FRAME_CFG);
 
-	val = line->fmt[MSM_VFE_PAD_SINK].width * 2 - 1;
+	val = line->fmt[MSM_VFE_PAD_SINK].width * pixel_samples - 1;
 	writel_relaxed(val, vfe->base + VFE_0_CAMIF_WINDOW_WIDTH_CFG);
 
 	val = line->fmt[MSM_VFE_PAD_SINK].height - 1;

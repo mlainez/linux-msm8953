@@ -284,10 +284,26 @@ const struct camss_formats vfe_formats_pix_845 = {
 	.formats = formats_rdi_845
 };
 
+/*
+ * The msm8953 pixel path debayers GRBG 10-bit frames to NV12 with a fixed
+ * pipeline.
+ */
+static bool vfe_pix_debayers(struct vfe_line *line, u32 code)
+{
+	struct vfe_device *vfe = to_vfe(line);
+
+	return line->id == VFE_LINE_PIX &&
+	       vfe->camss->res->version == CAMSS_8x53 &&
+	       code == MEDIA_BUS_FMT_SGRBG10_1X10;
+}
+
 static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
 			    unsigned int index, u32 src_req_code)
 {
 	struct vfe_device *vfe = to_vfe(line);
+
+	if (vfe_pix_debayers(line, sink_code))
+		return index > 0 ? 0 : MEDIA_BUS_FMT_YUYV8_1_5X8;
 
 	switch (vfe->camss->res->version) {
 	case CAMSS_8x16:
@@ -1438,7 +1454,7 @@ static void vfe_try_format(struct vfe_line *line,
 				break;
 
 		/* If not found, use UYVY as default */
-		if (i >= line->nformats)
+		if (i >= line->nformats && !vfe_pix_debayers(line, fmt->code))
 			fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
 
 		fmt->width = clamp_t(u32, fmt->width, 1, 8191);
