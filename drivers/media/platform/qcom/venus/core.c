@@ -903,16 +903,18 @@ static const struct venus_resources sdm845_res_v2 = {
 };
 
 /*
- * The core clock rates of the SoC, each with the load it carries at the
- * 863 cycles per macroblock an encode costs.
+ * The core clock rates of the SoC, each with the load it carries at 1467
+ * cycles per macroblock: the noisy frames of a sensor at high gain take
+ * that much to encode, 1.7 times what the downstream driver budgets.
+ * Below it the encoder falls behind and the stream drops to half rate.
  */
 static const struct freq_tbl msm8953_freq_table[] = {
-	{ 538818, 465000000 },
-	{ 463499, 400000000 },
-	{ 417149, 360000000 },
-	{ 359212, 310000000 },
-	{ 264855, 228570000 },
-	{ 132433, 114290000 },
+	{ 316973, 465000000 },
+	{ 272665, 400000000 },
+	{ 245399, 360000000 },
+	{ 211315, 310000000 },
+	{ 155808, 228570000 },
+	{ 77907, 114290000 },
 };
 
 static const struct reg_val msm8953_reg_preset[] = {
