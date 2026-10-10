@@ -639,6 +639,9 @@ static __maybe_unused int venus_runtime_resume(struct device *dev)
 	if (ret)
 		return ret;
 
+	core->video_avg_bw = kbps_to_icc(20000);
+	core->video_peak_bw = 0;
+
 	ret = icc_set_bw(core->cpucfg_path, kbps_to_icc(1000), 0);
 	if (ret)
 		return ret;
