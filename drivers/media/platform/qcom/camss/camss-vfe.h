@@ -99,6 +99,8 @@ struct vfe_line {
 	/* White balance gains of a debayering pixel line, Q7 */
 	u16 wb_red;
 	u16 wb_blue;
+	/* Its sensor's colour correction matrix */
+	const s16 *ccm;
 };
 
 struct vfe_device;
