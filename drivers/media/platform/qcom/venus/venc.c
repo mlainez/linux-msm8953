@@ -1390,6 +1390,7 @@ static void venc_buf_done(struct venus_inst *inst, unsigned int buf_type,
 		vb2_set_plane_payload(vb, 0, bytesused + data_offset);
 		vb->planes[0].data_offset = data_offset;
 		vb->timestamp = timestamp_us * NSEC_PER_USEC;
+		venus_helper_get_ts_metadata(inst, timestamp_us, vbuf);
 		vbuf->sequence = inst->sequence_cap++;
 		if ((vbuf->flags & V4L2_BUF_FLAG_LAST) &&
 		    inst->enc_state == VENUS_ENC_STATE_DRAIN) {
