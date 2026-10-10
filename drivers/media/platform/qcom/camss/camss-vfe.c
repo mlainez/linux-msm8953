@@ -285,16 +285,25 @@ const struct camss_formats vfe_formats_pix_845 = {
 };
 
 /*
- * The msm8953 pixel path debayers GRBG 10-bit frames to NV12 with a fixed
- * pipeline.
+ * The msm8953 pixel path debayers 10-bit frames of any Bayer order to
+ * NV12 with a fixed pipeline.
  */
 static bool vfe_pix_debayers(struct vfe_line *line, u32 code)
 {
 	struct vfe_device *vfe = to_vfe(line);
 
-	return line->id == VFE_LINE_PIX &&
-	       vfe->camss->res->version == CAMSS_8x53 &&
-	       code == MEDIA_BUS_FMT_SGRBG10_1X10;
+	if (line->id != VFE_LINE_PIX || vfe->camss->res->version != CAMSS_8x53)
+		return false;
+
+	switch (code) {
+	case MEDIA_BUS_FMT_SRGGB10_1X10:
+	case MEDIA_BUS_FMT_SGRBG10_1X10:
+	case MEDIA_BUS_FMT_SBGGR10_1X10:
+	case MEDIA_BUS_FMT_SGBRG10_1X10:
+		return true;
+	default:
+		return false;
+	}
 }
 
 static int vfe_s_ctrl(struct v4l2_ctrl *ctrl)
