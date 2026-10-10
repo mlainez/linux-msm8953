@@ -457,6 +457,9 @@ enum venus_inst_modes {
  * @drain_active:	Drain sequence is in progress
  * @flags:	bitmask flags describing current instance mode
  * @dpb_ids:	DPB buffer ID's
+ * @enc_frames:	encoder input frames queued, which picks their @tss slot
+ * @enc_ts_us:	the timestamp given to the firmware for the next encoder
+ *		input frame
  */
 struct venus_inst {
 	struct list_head list;
@@ -529,6 +532,8 @@ struct venus_inst {
 	bool drain_active;
 	enum venus_inst_modes flags;
 	struct ida dpb_ids;
+	u32 enc_frames;
+	u64 enc_ts_us;
 };
 
 #define IS_V1(core)	((core)->res->hfi_version == HFI_VERSION_1XX)
