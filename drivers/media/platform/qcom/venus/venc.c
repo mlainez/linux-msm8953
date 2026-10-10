@@ -658,6 +658,32 @@ static void venc_pm_touch(struct venus_inst *inst)
 	pm_runtime_mark_last_busy(inst->core->dev_enc);
 }
 
+/*
+ * HFI v3 firmware encodes in power save mode at about half the cycles per
+ * macroblock of full quality, which keeps sessions heavier than the top
+ * clock carries at full quality, such as 4K at 30 fps, at their frame rate.
+ * The firmware takes the mode only before the session allocates its
+ * buffers.
+ */
+static int venc_set_perf_mode(struct venus_inst *inst)
+{
+	const struct venus_resources *res = inst->core->res;
+	u32 mode = HFI_VENC_PERFMODE_MAX_QUALITY;
+	u32 mbs;
+
+	if (!IS_V3(inst->core) || !res->freq_tbl_size)
+		return 0;
+
+	mbs = (ALIGN(inst->width, 16) / 16) * (ALIGN(inst->height, 16) / 16);
+
+	if (mbs * inst->fps > res->freq_tbl[0].load &&
+	    inst->controls.enc.bitrate_mode != V4L2_MPEG_VIDEO_BITRATE_MODE_CQ)
+		mode = HFI_VENC_PERFMODE_POWER_SAVE;
+
+	return hfi_session_set_property(inst, HFI_PROPERTY_CONFIG_VENC_PERF_MODE,
+					&mode);
+}
+
 static int venc_set_properties(struct venus_inst *inst)
 {
 	struct venc_controls *ctr = &inst->controls.enc;
@@ -684,6 +710,10 @@ static int venc_set_properties(struct venus_inst *inst)
 	frate.framerate = inst->fps * (1 << 16);
 
 	ret = hfi_session_set_property(inst, ptype, &frate);
+	if (ret)
+		return ret;
+
+	ret = venc_set_perf_mode(inst);
 	if (ret)
 		return ret;
 
