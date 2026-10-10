@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 /*
  * Fairphone 3 rear camera module: Sony IMX363 (12MP) behind an
- * Asahi Kasei AK7374 voice coil motor, on CSIPHY0.
+ * ON Semiconductor LC898217XC voice coil motor, on CSIPHY0.
  *
  * Applied by drivers/misc/fp3_module_slot.c when the rear slot answers
  * at 0x10 with chip ID 0x0363 — some Fairphone 3 rear camera modules
@@ -53,12 +53,11 @@
 		};
 	};
 
-	fp3_rear_actuator: camera-lens@18 {
-		compatible = "asahi-kasei,ak7374";
-		reg = <0x18>;
+	fp3_rear_actuator: camera-lens@72 {
+		compatible = "onnn,lc898217xc";
+		reg = <0x72>;
 
 		vdd-supply = <&cam_vaf>;
-		vio-supply = <&cam_vio>;
 	};
 };
 
