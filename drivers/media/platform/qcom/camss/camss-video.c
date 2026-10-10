@@ -451,6 +451,18 @@ static int video_g_fmt(struct file *file, void *fh, struct v4l2_format *f)
 	return 0;
 }
 
+/*
+ * Largest plane of a line-based output: CAMSS_FRAME_MAX_HEIGHT_PIX image
+ * lines, which a single-plane NV12 buffer stores in one and a half times
+ * as many rows of bytes.
+ */
+static u32 video_max_plane_size(const struct camss_format_info *fi,
+				unsigned int plane, u32 bytesperline)
+{
+	return bytesperline * CAMSS_FRAME_MAX_HEIGHT_PIX /
+	       fi->vsub[plane].numerator * fi->vsub[plane].denominator;
+}
+
 static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 {
 	struct v4l2_pix_format_mplane *pix_mp;
@@ -464,16 +476,6 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 
 	pix_mp = &f->fmt.pix_mp;
 
-	if (video->line_based)
-		for (i = 0; i < pix_mp->num_planes && i < 3; i++) {
-			p = &pix_mp->plane_fmt[i];
-			bytesperline[i] = clamp_t(u32, p->bytesperline,
-						  1, 65528);
-			sizeimage[i] = clamp_t(u32, p->sizeimage,
-					       bytesperline[i],
-					       bytesperline[i] * CAMSS_FRAME_MAX_HEIGHT_PIX);
-		}
-
 	for (j = 0; j < video->nformats; j++)
 		if (pix_mp->pixelformat == video->formats[j].pixelformat)
 			break;
@@ -482,6 +484,16 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 		j = 0; /* default format */
 
 	fi = &video->formats[j];
+
+	if (video->line_based)
+		for (i = 0; i < pix_mp->num_planes && i < 3; i++) {
+			p = &pix_mp->plane_fmt[i];
+			bytesperline[i] = clamp_t(u32, p->bytesperline,
+						  1, 65528);
+			sizeimage[i] = clamp_t(u32, p->sizeimage,
+					       bytesperline[i],
+					       video_max_plane_size(fi, i, bytesperline[i]));
+		}
 	width = pix_mp->width;
 	height = pix_mp->height;
 
@@ -515,7 +527,7 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 						  1, 65528);
 			p->sizeimage = clamp_t(u32, p->sizeimage,
 					       p->bytesperline,
-					       p->bytesperline * CAMSS_FRAME_MAX_HEIGHT_PIX);
+					       video_max_plane_size(fi, i, p->bytesperline));
 			lines = p->sizeimage / p->bytesperline;
 
 			if (p->bytesperline < bytesperline[i])
