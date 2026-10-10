@@ -697,10 +697,32 @@ static void vfe_set_rgb_lut(struct vfe_device *vfe)
 }
 
 /*
- * Colour correction of the S5KGM1SP under D50 from its Qualcomm
- * calibration, Q7, rows and columns in the hardware's G, B, R order.
+ * Colour correction under D50 from the Qualcomm calibration of the
+ * Fairphone 3+ sensors, Q7, rows and columns in the hardware's G, B, R
+ * order. Other sensors get none.
  */
-static const s16 vfe_ccm[9] = { 188, -36, -24, -91, 211, 8, -55, -20, 203 };
+static const struct {
+	const char *model;
+	s16 ccm[9];
+} vfe_sensor_ccm[] = {
+	{ "s5kgm1sp", { 188, -36, -24, -91, 211, 8, -55, -20, 203 } },
+	{ "s5k3p9sp", { 195, -40, -27, -91, 208, 10, -45, -20, 193 } },
+};
+
+static const s16 vfe_ccm_identity[9] = { 128, 0, 0, 0, 128, 0, 0, 0, 128 };
+
+static const s16 *vfe_sensor_ccm_of(struct vfe_line *line)
+{
+	struct media_pad *pad = camss_find_sensor_pad(&line->subdev.entity);
+	unsigned int i;
+
+	for (i = 0; pad && i < ARRAY_SIZE(vfe_sensor_ccm); i++)
+		if (!strncmp(pad->entity->name, vfe_sensor_ccm[i].model,
+			     strlen(vfe_sensor_ccm[i].model)))
+			return vfe_sensor_ccm[i].ccm;
+
+	return vfe_ccm_identity;
+}
 
 /* Sensor black level in the 12-bit pipeline */
 #define VFE_BLACK_LEVEL		257
@@ -710,18 +732,18 @@ static const s16 vfe_ccm[9] = { 188, -36, -24, -91, 211, 8, -55, -20, 203 };
  * gamma curve: the pedestal has been through the white balance gains by
  * then, and the matrix mixes the channels.
  */
-static void vfe_write_ccm(struct vfe_device *vfe, const u32 gains[3])
+static void vfe_write_ccm(struct vfe_device *vfe, const s16 *ccm, const u32 gains[3])
 {
 	unsigned int i, j;
 
 	for (i = 0; i < 9; i++)
-		writel_relaxed(vfe_ccm[i] & 0xfff, vfe->base + VFE_0_CC_COEF(i));
+		writel_relaxed(ccm[i] & 0xfff, vfe->base + VFE_0_CC_COEF(i));
 
 	for (i = 0; i < 3; i++) {
 		s32 offset = 0;
 
 		for (j = 0; j < 3; j++)
-			offset -= vfe_ccm[i * 3 + j] * (s32)(VFE_BLACK_LEVEL * gains[j] / 128);
+			offset -= ccm[i * 3 + j] * (s32)(VFE_BLACK_LEVEL * gains[j] / 128);
 		offset /= 128;
 		writel_relaxed(clamp(offset, -1024, 1023) & 0x7ff, vfe->base + VFE_0_CC_OFFSET(i));
 	}
@@ -735,7 +757,7 @@ static void vfe_write_wb_gains(struct vfe_device *vfe, struct vfe_line *line)
 	const u32 gains[3] = { g, b, r };
 
 	writel_relaxed(g | b << 9 | r << 18, vfe->base + VFE_0_WB_CFG);
-	vfe_write_ccm(vfe, gains);
+	vfe_write_ccm(vfe, line->ccm, gains);
 
 	/* Demosaic interpolates with the same ratios to green */
 	writel_relaxed(r | b << 15, vfe->base + VFE_0_DEMOSAIC_WB_GAIN_0);
@@ -752,6 +774,8 @@ static void vfe_set_wb_gains(struct vfe_device *vfe, struct vfe_line *line)
 static void vfe_set_bayer_cfg(struct vfe_device *vfe, struct vfe_line *line)
 {
 	unsigned int i;
+
+	line->ccm = vfe_sensor_ccm_of(line);
 
 	for (i = 0; i < ARRAY_SIZE(vfe_bayer_cfg); i++)
 		writel_relaxed(vfe_bayer_cfg[i].value,
