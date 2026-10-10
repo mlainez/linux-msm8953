@@ -297,6 +297,59 @@ static bool vfe_pix_debayers(struct vfe_line *line, u32 code)
 	       code == MEDIA_BUS_FMT_SGRBG10_1X10;
 }
 
+static int vfe_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct vfe_line *line = container_of(ctrl->handler, struct vfe_line, ctrls);
+	struct vfe_device *vfe = to_vfe(line);
+	unsigned long flags;
+
+	switch (ctrl->id) {
+	case V4L2_CID_RED_BALANCE:
+		line->wb_red = ctrl->val;
+		break;
+	case V4L2_CID_BLUE_BALANCE:
+		line->wb_blue = ctrl->val;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	/* A stopped line is unclocked; the gains apply when it starts */
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	if (line->output.state > VFE_OUTPUT_RESERVED)
+		vfe->res->hw_ops->set_wb_gains(vfe, line);
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	return 0;
+}
+
+static const struct v4l2_ctrl_ops vfe_ctrl_ops = {
+	.s_ctrl = vfe_s_ctrl,
+};
+
+/* White balance controls of a pixel line that debayers, Q7 gains */
+static int vfe_init_ctrls(struct vfe_line *line)
+{
+	struct v4l2_ctrl_handler *hdl = &line->ctrls;
+
+	line->wb_red = 128;
+	line->wb_blue = 128;
+
+	v4l2_ctrl_handler_init(hdl, 2);
+	v4l2_ctrl_new_std(hdl, &vfe_ctrl_ops, V4L2_CID_RED_BALANCE, 32, 511, 1, 128);
+	v4l2_ctrl_new_std(hdl, &vfe_ctrl_ops, V4L2_CID_BLUE_BALANCE, 32, 511, 1, 128);
+	if (hdl->error) {
+		int ret = hdl->error;
+
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
+
+	line->subdev.ctrl_handler = hdl;
+
+	return 0;
+}
+
 static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
 			    unsigned int index, u32 src_req_code)
 {
@@ -2183,6 +2236,12 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 
 		v4l2_set_subdevdata(sd, &vfe->line[i]);
 
+		if (i == VFE_LINE_PIX && vfe->res->hw_ops->set_wb_gains) {
+			ret = vfe_init_ctrls(&vfe->line[i]);
+			if (ret < 0)
+				goto error_init;
+		}
+
 		ret = vfe_init_formats(sd, NULL);
 		if (ret < 0) {
 			dev_err(dev, "Failed to init format: %d\n", ret);
@@ -2281,6 +2340,7 @@ void msm_vfe_unregister_entities(struct vfe_device *vfe)
 		msm_video_unregister(video_out);
 		v4l2_device_unregister_subdev(sd);
 		media_entity_cleanup(&sd->entity);
+		v4l2_ctrl_handler_free(&vfe->line[i].ctrls);
 	}
 }
 
