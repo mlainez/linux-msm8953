@@ -764,9 +764,12 @@ static int venc_set_properties(struct venus_inst *inst)
 		 * n = 0 - only the first I-frame is IDR frame
 		 * n = 1 - all I-frames will be IDR frames
 		 * n > 1 - every n-th I-frame will be IDR frame
+		 *
+		 * Every GOP starts with an IDR frame, so a decoder can join
+		 * the stream at any GOP boundary.
 		 */
 		ptype = HFI_PROPERTY_CONFIG_VENC_IDR_PERIOD;
-		idrp.idr_period = 0;
+		idrp.idr_period = 1;
 		ret = hfi_session_set_property(inst, ptype, &idrp);
 		if (ret)
 			return ret;
@@ -1201,6 +1204,11 @@ static void venc_release_session(struct venus_inst *inst)
 	INIT_LIST_HEAD(&inst->registeredbufs);
 	venus_pm_release_core(inst);
 
+	if (inst->codec_held) {
+		inst->codec_held = false;
+		venc_pm_put(inst, false);
+	}
+
 	venc_pm_put(inst, false);
 }
 
@@ -1271,17 +1279,22 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
 	inst->sequence_cap = 0;
 	inst->sequence_out = 0;
 
-	ret = venc_pm_get(inst);
-	if (ret)
-		goto error;
+	/*
+	 * The codec stays powered until the session is released: a session
+	 * whose clock and power domain go away while it is loaded stops
+	 * returning frames, and that happens whenever buffers stop arriving
+	 * for longer than the autosuspend delay.
+	 */
+	if (!inst->codec_held) {
+		ret = venc_pm_get(inst);
+		if (ret)
+			goto error;
+		inst->codec_held = true;
+	}
 
 	ret = venus_pm_acquire_core(inst);
 	if (ret)
 		goto put_power;
-
-	ret = venc_pm_put(inst, true);
-	if (ret)
-		goto error;
 
 	ret = venc_set_properties(inst);
 	if (ret)
@@ -1307,6 +1320,7 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
 	return 0;
 
 put_power:
+	inst->codec_held = false;
 	venc_pm_put(inst, false);
 error:
 	venus_helper_buffers_done(inst, q->type, VB2_BUF_STATE_QUEUED);
