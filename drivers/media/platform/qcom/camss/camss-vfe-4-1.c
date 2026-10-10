@@ -313,8 +313,9 @@ static void vfe_wm_line_based(struct vfe_device *vfe, u32 wm,
 
 		wpl = vfe_word_per_line(pix->pixelformat, bytesperline);
 
+		/* msm8953 moved the buffer height down a bit */
 		reg = 0x3;
-		reg |= (height - 1) << 4;
+		reg |= (height - 1) << (vfe->camss->res->version == CAMSS_8x53 ? 3 : 4);
 		reg |= wpl << 16;
 
 		writel_relaxed(reg, vfe->base +
