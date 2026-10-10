@@ -36,6 +36,7 @@
 #define VFE_0_MODULE_CFG_DEMOSAIC		BIT(4)
 #define VFE_0_MODULE_CFG_WB			BIT(11)
 #define VFE_0_MODULE_CFG_COLOR_CORRECT		BIT(13)
+#define VFE_0_MODULE_CFG_RGB_LUT		BIT(14)
 #define VFE_0_MODULE_CFG_CHROMA_ENHANCE		BIT(17)
 #define VFE_0_MODULE_CFG_COLOR_XFORM_ENC	BIT(21)
 #define VFE_0_MODULE_CFG_SCALE_ENC		BIT(23)
@@ -186,6 +187,22 @@
 #define VFE_0_DEMUX_ODD_CFG_PATTERN_YVYU	0xac9c
 #define VFE_0_DEMUX_ODD_CFG_PATTERN_UYVY	0xc9ca
 #define VFE_0_DEMUX_ODD_CFG_PATTERN_VYUY	0xcac9
+
+#define VFE_0_DEMOSAIC_WB_GAIN_0		0x518
+#define VFE_0_DEMOSAIC_WB_GAIN_1		0x51c
+#define VFE_0_WB_CFG				0x580
+#define VFE_0_CC_COEF(n)			(0x5d0 + 0x4 * (n))
+#define VFE_0_CC_OFFSET(n)			(0x5f4 + 0x4 * (n))
+#define VFE_0_CC_COEF_Q				0x600
+#define VFE_0_RGB_LUT_BANK_SEL			0x638
+
+#define VFE_0_DMI_CFG				0x910
+#define VFE_0_DMI_CFG_AUTO_INC			BIT(8)
+#define VFE_0_DMI_ADDR				0x914
+#define VFE_0_DMI_DATA_LO			0x91c
+#define VFE_0_DMI_RGB_LUT_CH0			0x9
+#define VFE_0_DMI_RGB_LUT_CH1			0xb
+#define VFE_0_DMI_RGB_LUT_CH2			0xd
 
 #define VFE_0_STATS_CFG				0x888
 #define VFE_0_STATS_CFG_COLOR_CONV_EN		BIT(0)
@@ -614,16 +631,15 @@ static bool vfe_is_bayer(struct vfe_line *line)
 
 /*
  * Fixed Bayer pipeline: demosaic with its default interpolation
- * classifier, unity white balance, identity colour correction and full
- * range BT.601 RGB to YCbCr conversion, ahead of the encoder scaler.
+ * classifier, a gamma curve and full range BT.601 RGB to YCbCr
+ * conversion, ahead of the encoder scaler. White balance comes from the
+ * line's controls, colour correction from the sensor's calibration.
  */
 static const struct {
 	u16 offset;
 	u32 value;
 } vfe_bayer_cfg[] = {
 	{ 0x440, 0x00000000 },	/* demosaic: BPC, BCC and ABF off */
-	{ 0x518, 0x00400080 },	/* demosaic WB ratios r/g, b/g: 1.0 */
-	{ 0x51c, 0x00400080 },	/* demosaic WB ratios g/r, g/b: 1.0 */
 	{ 0x520, 0x80003066 }, { 0x524, 0x81003066 }, { 0x528, 0x82003066 },
 	{ 0x52c, 0x83003066 }, { 0x530, 0x84003066 }, { 0x534, 0x85003066 },
 	{ 0x538, 0x86003066 }, { 0x53c, 0x87003066 }, { 0x540, 0x88003066 },
@@ -632,11 +648,6 @@ static const struct {
 	{ 0x55c, 0x863fe066 }, { 0x560, 0x873fe066 }, { 0x564, 0x883fe066 },
 	{ 0x568, 0x0080ff00 },	/* demosaic interpolation, green */
 	{ 0x56c, 0x0001a020 },
-	{ 0x580, 0x02010080 },	/* white balance G, B, R: 1.0 */
-	{ 0x5d0, 0x080 }, { 0x5d4, 0 }, { 0x5d8, 0 },	/* colour correction: */
-	{ 0x5dc, 0 }, { 0x5e0, 0x080 }, { 0x5e4, 0 },	/* identity, Q7 */
-	{ 0x5e8, 0 }, { 0x5ec, 0 }, { 0x5f0, 0x080 },
-	{ 0x5f4, 0 }, { 0x5f8, 0 }, { 0x5fc, 0 }, { 0x600, 0 },
 	{ 0x640, 0x04d },	/* RGB to Y: 0.299, 0.587, 0.114 in Q8 */
 	{ 0x644, 0x096 },
 	{ 0x648, 0x01d },
@@ -656,7 +667,91 @@ static const struct {
 	{ 0x738, 0x00000000 },
 };
 
-static void vfe_set_bayer_cfg(struct vfe_device *vfe)
+/*
+ * Gamma 2.2 over the 64 segments of each channel's RGB lookup table. Each
+ * entry is the segment's 8-bit base and its rise to the next segment.
+ */
+static const u8 vfe_gamma_base[65] = {
+	0, 39, 53, 63, 72, 80, 87, 93, 99, 105, 110, 115, 119, 124, 128, 132,
+	136, 140, 143, 147, 150, 154, 157, 160, 163, 166, 169, 172, 175, 178,
+	181, 183, 186, 189, 191, 194, 196, 199, 201, 204, 206, 208, 211, 213,
+	215, 217, 219, 222, 224, 226, 228, 230, 232, 234, 236, 238, 240, 242,
+	244, 246, 248, 249, 251, 253, 255,
+};
+
+static void vfe_set_rgb_lut(struct vfe_device *vfe)
+{
+	static const u8 rams[] = {
+		VFE_0_DMI_RGB_LUT_CH0, VFE_0_DMI_RGB_LUT_CH1, VFE_0_DMI_RGB_LUT_CH2,
+	};
+	unsigned int r, i;
+
+	for (r = 0; r < ARRAY_SIZE(rams); r++) {
+		writel_relaxed(VFE_0_DMI_CFG_AUTO_INC | rams[r], vfe->base + VFE_0_DMI_CFG);
+		writel_relaxed(0, vfe->base + VFE_0_DMI_ADDR);
+		for (i = 0; i < 64; i++)
+			writel_relaxed((vfe_gamma_base[i + 1] - vfe_gamma_base[i]) << 8 |
+				       vfe_gamma_base[i], vfe->base + VFE_0_DMI_DATA_LO);
+	}
+
+	writel_relaxed(0, vfe->base + VFE_0_DMI_CFG);
+	writel_relaxed(0, vfe->base + VFE_0_RGB_LUT_BANK_SEL);
+}
+
+/*
+ * Colour correction of the S5KGM1SP under D50 from its Qualcomm
+ * calibration, Q7, rows and columns in the hardware's G, B, R order.
+ */
+static const s16 vfe_ccm[9] = { 188, -36, -24, -91, 211, 8, -55, -20, 203 };
+
+/* Sensor black level in the 12-bit pipeline */
+#define VFE_BLACK_LEVEL		257
+
+/*
+ * The colour correction offsets take the black level out ahead of the
+ * gamma curve: the pedestal has been through the white balance gains by
+ * then, and the matrix mixes the channels.
+ */
+static void vfe_write_ccm(struct vfe_device *vfe, const u32 gains[3])
+{
+	unsigned int i, j;
+
+	for (i = 0; i < 9; i++)
+		writel_relaxed(vfe_ccm[i] & 0xfff, vfe->base + VFE_0_CC_COEF(i));
+
+	for (i = 0; i < 3; i++) {
+		s32 offset = 0;
+
+		for (j = 0; j < 3; j++)
+			offset -= vfe_ccm[i * 3 + j] * (s32)(VFE_BLACK_LEVEL * gains[j] / 128);
+		offset /= 128;
+		writel_relaxed(clamp(offset, -1024, 1023) & 0x7ff, vfe->base + VFE_0_CC_OFFSET(i));
+	}
+
+	writel_relaxed(0, vfe->base + VFE_0_CC_COEF_Q);
+}
+
+static void vfe_write_wb_gains(struct vfe_device *vfe, struct vfe_line *line)
+{
+	u32 r = line->wb_red, b = line->wb_blue, g = 128;
+	const u32 gains[3] = { g, b, r };
+
+	writel_relaxed(g | b << 9 | r << 18, vfe->base + VFE_0_WB_CFG);
+	vfe_write_ccm(vfe, gains);
+
+	/* Demosaic interpolates with the same ratios to green */
+	writel_relaxed(r | b << 15, vfe->base + VFE_0_DEMOSAIC_WB_GAIN_0);
+	writel_relaxed(min(g * 128 / r, 511U) | min(g * 128 / b, 511U) << 15,
+		       vfe->base + VFE_0_DEMOSAIC_WB_GAIN_1);
+}
+
+static void vfe_set_wb_gains(struct vfe_device *vfe, struct vfe_line *line)
+{
+	vfe_write_wb_gains(vfe, line);
+	vfe_reg_update(vfe, line->id);
+}
+
+static void vfe_set_bayer_cfg(struct vfe_device *vfe, struct vfe_line *line)
 {
 	unsigned int i;
 
@@ -664,8 +759,12 @@ static void vfe_set_bayer_cfg(struct vfe_device *vfe)
 		writel_relaxed(vfe_bayer_cfg[i].value,
 			       vfe->base + vfe_bayer_cfg[i].offset);
 
+	vfe_write_wb_gains(vfe, line);
+	vfe_set_rgb_lut(vfe);
+
 	writel_relaxed(VFE_0_MODULE_CFG_DEMUX | VFE_0_MODULE_CFG_DEMOSAIC |
 		       VFE_0_MODULE_CFG_WB | VFE_0_MODULE_CFG_COLOR_CORRECT |
+		       VFE_0_MODULE_CFG_RGB_LUT |
 		       VFE_0_MODULE_CFG_CHROMA_ENHANCE |
 		       VFE_0_MODULE_CFG_COLOR_XFORM_ENC |
 		       VFE_0_MODULE_CFG_SCALE_ENC | VFE_0_MODULE_CFG_CROP_ENC,
@@ -691,7 +790,7 @@ static void vfe_set_demux_cfg(struct vfe_device *vfe, struct vfe_line *line)
 			       vfe->base + VFE_0_DEMUX_ODD_CFG);
 
 		/* The rest of the Bayer pipeline follows the demux */
-		vfe_set_bayer_cfg(vfe);
+		vfe_set_bayer_cfg(vfe, line);
 		return;
 	}
 
@@ -1117,6 +1216,7 @@ const struct vfe_hw_ops vfe_ops_4_1 = {
 	.pm_domain_on = vfe_4_1_pm_domain_on,
 	.reg_update_clear = vfe_reg_update_clear,
 	.reg_update = vfe_reg_update,
+	.set_wb_gains = vfe_set_wb_gains,
 	.subdev_init = vfe_subdev_init,
 	.vfe_disable = vfe_gen1_disable,
 	.vfe_enable = vfe_gen1_enable,
