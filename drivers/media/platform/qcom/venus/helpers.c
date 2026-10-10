@@ -473,6 +473,31 @@ put_ts_metadata(struct venus_inst *inst, struct vb2_v4l2_buffer *vbuf)
 	inst->tss[slot].ts_ns = vb->timestamp;
 }
 
+/*
+ * Encoder rate control budgets bits by the input timestamps, which clients
+ * may use for something else: GStreamer stores a frame number in the
+ * seconds. Give the firmware timestamps one frame interval apart, and keep
+ * the client's to restore on the encoded frame.
+ */
+static u64 enc_ts_metadata(struct venus_inst *inst, struct vb2_v4l2_buffer *vbuf)
+{
+	struct venus_ts_metadata *ts;
+	u64 us_per_frame;
+
+	ts = &inst->tss[inst->enc_frames++ % ARRAY_SIZE(inst->tss)];
+	ts->used = true;
+	ts->flags = vbuf->flags;
+	ts->tc = vbuf->timecode;
+	ts->ts_ns = vbuf->vb2_buf.timestamp;
+	ts->ts_us = inst->enc_ts_us;
+
+	us_per_frame = inst->timeperframe.numerator * (u64)USEC_PER_SEC;
+	do_div(us_per_frame, inst->timeperframe.denominator ?: 1);
+	inst->enc_ts_us += us_per_frame ?: 1;
+
+	return ts->ts_us;
+}
+
 void venus_helper_get_ts_metadata(struct venus_inst *inst, u64 timestamp_us,
 				  struct vb2_v4l2_buffer *vbuf)
 {
@@ -521,6 +546,8 @@ session_process_buf(struct venus_inst *inst, struct vb2_v4l2_buffer *vbuf)
 
 		if (inst->session_type == VIDC_SESSION_TYPE_DEC)
 			put_ts_metadata(inst, vbuf);
+		else
+			fdata.timestamp = enc_ts_metadata(inst, vbuf);
 
 		venus_pm_load_scale(inst);
 	} else if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
