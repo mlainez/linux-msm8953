@@ -70,6 +70,7 @@ struct vfe_output {
 		struct {
 			int active_buf;
 			int wait_sof;
+			int drop_update_pending;
 		} gen1;
 		struct {
 			int active_num;
