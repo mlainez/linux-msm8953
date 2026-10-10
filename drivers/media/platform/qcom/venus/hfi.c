@@ -140,11 +140,22 @@ int hfi_core_trigger_ssr(struct venus_core *core, u32 type)
 
 static int wait_session_msg(struct venus_inst *inst)
 {
+	struct venus_core *core = inst->core;
 	int ret;
 
 	ret = wait_for_completion_timeout(&inst->done, TIMEOUT);
-	if (!ret)
+	if (!ret) {
+		/*
+		 * A firmware that stops answering raises no SYS_ERROR of its
+		 * own, so every later session would time out as well. Restart
+		 * it through the same recovery as a firmware watchdog.
+		 */
+		if (!test_bit(0, &core->sys_error)) {
+			dev_warn(core->dev, "firmware did not answer, restarting it\n");
+			core->core_ops->event_notify(core, EVT_SYS_WATCHDOG_TIMEOUT);
+		}
 		return -ETIMEDOUT;
+	}
 
 	if (inst->error != HFI_ERR_NONE)
 		return -EIO;

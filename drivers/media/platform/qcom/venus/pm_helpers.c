@@ -297,6 +297,39 @@ exit:
 	return ret;
 }
 
+/*
+ * A core with a performance domain next to its GDSC has two power domains,
+ * so the driver core attaches neither. Attach the GDSC so that it follows
+ * the core's runtime PM, and the performance domain so that setting the
+ * core clock rate votes the corner the OPP table requires for it.
+ */
+static int core_domains_get_v1(struct venus_core *core)
+{
+	struct device *dev = core->dev;
+	const struct venus_resources *res = core->res;
+	struct dev_pm_domain_attach_data gdsc_data = {
+		.pd_names = (const char *[]) { "venus" },
+		.num_pd_names = 1,
+		.pd_flags = PD_FLAG_DEV_LINK_ON,
+	};
+	struct dev_pm_domain_attach_data opp_pd_data = {
+		.pd_names = res->opp_pmdomain,
+		.num_pd_names = 1,
+		.pd_flags = PD_FLAG_DEV_LINK_ON | PD_FLAG_REQUIRED_OPP,
+	};
+	int ret;
+
+	ret = devm_pm_domain_attach_list(dev, &gdsc_data, &core->pmdomains);
+	if (ret < 0)
+		return ret;
+
+	ret = devm_pm_domain_attach_list(dev, &opp_pd_data, &core->opp_pmdomain);
+	if (ret < 0)
+		return ret;
+
+	return devm_pm_opp_of_add_table(dev);
+}
+
 static int core_get_v1(struct venus_core *core)
 {
 	int ret;
@@ -308,6 +341,9 @@ static int core_get_v1(struct venus_core *core)
 	ret = devm_pm_opp_set_clkname(core->dev, "core");
 	if (ret)
 		return ret;
+
+	if (core->res->opp_pmdomain)
+		return core_domains_get_v1(core);
 
 	return 0;
 }
