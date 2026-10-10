@@ -85,6 +85,8 @@ struct vfe_output {
 	struct completion reg_update;
 };
 
+struct vfe_sensor_cal;
+
 struct vfe_line {
 	enum vfe_line_id id;
 	struct v4l2_subdev subdev;
@@ -100,8 +102,8 @@ struct vfe_line {
 	/* White balance gains of a debayering pixel line, Q7 */
 	u16 wb_red;
 	u16 wb_blue;
-	/* Its sensor's colour correction matrix */
-	const s16 *ccm;
+	/* Its sensor's black level and colour correction */
+	const struct vfe_sensor_cal *cal;
 };
 
 struct vfe_device;

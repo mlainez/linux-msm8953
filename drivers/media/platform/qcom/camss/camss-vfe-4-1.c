@@ -43,7 +43,10 @@
 #define VFE_0_MODULE_CFG_CROP_ENC		BIT(27)
 
 #define VFE_0_CORE_CFG			0x01c
+#define VFE_0_CORE_CFG_PIXEL_PATTERN_RGRGRG	0x0
 #define VFE_0_CORE_CFG_PIXEL_PATTERN_GRGRGR	0x1
+#define VFE_0_CORE_CFG_PIXEL_PATTERN_BGBGBG	0x2
+#define VFE_0_CORE_CFG_PIXEL_PATTERN_GBGBGB	0x3
 #define VFE_0_CORE_CFG_PIXEL_PATTERN_YCBYCR	0x4
 #define VFE_0_CORE_CFG_PIXEL_PATTERN_YCRYCB	0x5
 #define VFE_0_CORE_CFG_PIXEL_PATTERN_CBYCRY	0x6
@@ -176,13 +179,11 @@
 #define VFE_0_DEMUX_R_GAIN_0			0x430
 #define VFE_0_DEMUX_R_GAIN_1			0x434
 #define VFE_0_DEMUX_EVEN_CFG			0x438
-#define VFE_0_DEMUX_EVEN_CFG_PATTERN_GRBG	0x9c
 #define VFE_0_DEMUX_EVEN_CFG_PATTERN_YUYV	0x9cac
 #define VFE_0_DEMUX_EVEN_CFG_PATTERN_YVYU	0xac9c
 #define VFE_0_DEMUX_EVEN_CFG_PATTERN_UYVY	0xc9ca
 #define VFE_0_DEMUX_EVEN_CFG_PATTERN_VYUY	0xcac9
 #define VFE_0_DEMUX_ODD_CFG			0x43c
-#define VFE_0_DEMUX_ODD_CFG_PATTERN_GRBG	0xca
 #define VFE_0_DEMUX_ODD_CFG_PATTERN_YUYV	0x9cac
 #define VFE_0_DEMUX_ODD_CFG_PATTERN_YVYU	0xac9c
 #define VFE_0_DEMUX_ODD_CFG_PATTERN_UYVY	0xc9ca
@@ -622,9 +623,37 @@ static void vfe_enable_irq_common(struct vfe_device *vfe)
 	vfe_reg_set(vfe, VFE_0_IRQ_MASK_1, irq_en1);
 }
 
+/*
+ * The CAMIF pixel pattern and the demux channel order of each Bayer
+ * order. The demux takes one nibble per pixel of a line pair, first pixel
+ * lowest: 0xc for green, 0x9 for red, 0xa for blue.
+ */
+static const struct vfe_bayer_order {
+	u32 code;
+	u32 pattern;
+	u32 even_cfg;
+	u32 odd_cfg;
+} vfe_bayer_orders[] = {
+	{ MEDIA_BUS_FMT_SRGGB10_1X10, VFE_0_CORE_CFG_PIXEL_PATTERN_RGRGRG, 0xc9, 0xac },
+	{ MEDIA_BUS_FMT_SGRBG10_1X10, VFE_0_CORE_CFG_PIXEL_PATTERN_GRGRGR, 0x9c, 0xca },
+	{ MEDIA_BUS_FMT_SBGGR10_1X10, VFE_0_CORE_CFG_PIXEL_PATTERN_BGBGBG, 0xca, 0x9c },
+	{ MEDIA_BUS_FMT_SGBRG10_1X10, VFE_0_CORE_CFG_PIXEL_PATTERN_GBGBGB, 0xac, 0xc9 },
+};
+
+static const struct vfe_bayer_order *vfe_bayer_order(struct vfe_line *line)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(vfe_bayer_orders); i++)
+		if (vfe_bayer_orders[i].code == line->fmt[MSM_VFE_PAD_SINK].code)
+			return &vfe_bayer_orders[i];
+
+	return NULL;
+}
+
 static bool vfe_is_bayer(struct vfe_line *line)
 {
-	return line->fmt[MSM_VFE_PAD_SINK].code == MEDIA_BUS_FMT_SGRBG10_1X10;
+	return vfe_bayer_order(line);
 }
 
 /*
@@ -697,43 +726,50 @@ static void vfe_set_rgb_lut(struct vfe_device *vfe)
 }
 
 /*
- * Colour correction under D50 from the Qualcomm calibration of the
- * Fairphone 3+ sensors, Q7, rows and columns in the hardware's G, B, R
- * order. Other sensors get none.
+ * Black level in the 12-bit pipeline, and colour correction under D50
+ * from the Qualcomm calibration of the Fairphone 3 and 3+ sensors, Q7,
+ * rows and columns in the hardware's G, B, R order. The S5K4H7YX driver
+ * programs a pedestal of 128 in 10-bit units. Other sensors get a black
+ * level of 64 in 10-bit units and no colour correction.
  */
-static const struct {
+static const struct vfe_sensor_cal {
 	const char *model;
+	u16 black;
 	s16 ccm[9];
-} vfe_sensor_ccm[] = {
-	{ "s5kgm1sp", { 188, -36, -24, -91, 211, 8, -55, -20, 203 } },
-	{ "s5k3p9sp", { 195, -40, -27, -91, 208, 10, -45, -20, 193 } },
+} vfe_sensor_cal[] = {
+	{ "s5kgm1sp", 257, { 188, -36, -24, -91, 211, 8, -55, -20, 203 } },
+	{ "s5k3p9sp", 257, { 195, -40, -27, -91, 208, 10, -45, -20, 193 } },
+	{ "imx363", 256, { 218, -55, -35, -90, 217, 1, -57, -30, 215 } },
+	{ "s5k4h7yx", 512, { 171, -17, -26, -129, 256, 1, -117, 18, 227 } },
 };
 
-static const s16 vfe_ccm_identity[9] = { 128, 0, 0, 0, 128, 0, 0, 0, 128 };
+static const struct vfe_sensor_cal vfe_sensor_cal_default = {
+	.black = 257,
+	.ccm = { 128, 0, 0, 0, 128, 0, 0, 0, 128 },
+};
 
-static const s16 *vfe_sensor_ccm_of(struct vfe_line *line)
+static const struct vfe_sensor_cal *vfe_sensor_cal_of(struct vfe_line *line)
 {
 	struct media_pad *pad = camss_find_sensor_pad(&line->subdev.entity);
 	unsigned int i;
 
-	for (i = 0; pad && i < ARRAY_SIZE(vfe_sensor_ccm); i++)
-		if (!strncmp(pad->entity->name, vfe_sensor_ccm[i].model,
-			     strlen(vfe_sensor_ccm[i].model)))
-			return vfe_sensor_ccm[i].ccm;
+	for (i = 0; pad && i < ARRAY_SIZE(vfe_sensor_cal); i++)
+		if (!strncmp(pad->entity->name, vfe_sensor_cal[i].model,
+			     strlen(vfe_sensor_cal[i].model)))
+			return &vfe_sensor_cal[i];
 
-	return vfe_ccm_identity;
+	return &vfe_sensor_cal_default;
 }
-
-/* Sensor black level in the 12-bit pipeline */
-#define VFE_BLACK_LEVEL		257
 
 /*
  * The colour correction offsets take the black level out ahead of the
  * gamma curve: the pedestal has been through the white balance gains by
  * then, and the matrix mixes the channels.
  */
-static void vfe_write_ccm(struct vfe_device *vfe, const s16 *ccm, const u32 gains[3])
+static void vfe_write_ccm(struct vfe_device *vfe, const struct vfe_sensor_cal *cal,
+			  const u32 gains[3])
 {
+	const s16 *ccm = cal->ccm;
 	unsigned int i, j;
 
 	for (i = 0; i < 9; i++)
@@ -743,7 +779,7 @@ static void vfe_write_ccm(struct vfe_device *vfe, const s16 *ccm, const u32 gain
 		s32 offset = 0;
 
 		for (j = 0; j < 3; j++)
-			offset -= ccm[i * 3 + j] * (s32)(VFE_BLACK_LEVEL * gains[j] / 128);
+			offset -= ccm[i * 3 + j] * (s32)(cal->black * gains[j] / 128);
 		offset /= 128;
 		writel_relaxed(clamp(offset, -1024, 1023) & 0x7ff, vfe->base + VFE_0_CC_OFFSET(i));
 	}
@@ -757,7 +793,7 @@ static void vfe_write_wb_gains(struct vfe_device *vfe, struct vfe_line *line)
 	const u32 gains[3] = { g, b, r };
 
 	writel_relaxed(g | b << 9 | r << 18, vfe->base + VFE_0_WB_CFG);
-	vfe_write_ccm(vfe, line->ccm, gains);
+	vfe_write_ccm(vfe, line->cal, gains);
 
 	/* Demosaic interpolates with the same ratios to green */
 	writel_relaxed(r | b << 15, vfe->base + VFE_0_DEMOSAIC_WB_GAIN_0);
@@ -775,7 +811,7 @@ static void vfe_set_bayer_cfg(struct vfe_device *vfe, struct vfe_line *line)
 {
 	unsigned int i;
 
-	line->ccm = vfe_sensor_ccm_of(line);
+	line->cal = vfe_sensor_cal_of(line);
 
 	for (i = 0; i < ARRAY_SIZE(vfe_bayer_cfg); i++)
 		writel_relaxed(vfe_bayer_cfg[i].value,
@@ -796,9 +832,10 @@ static void vfe_set_bayer_cfg(struct vfe_device *vfe, struct vfe_line *line)
 
 static void vfe_set_demux_cfg(struct vfe_device *vfe, struct vfe_line *line)
 {
+	const struct vfe_bayer_order *order = vfe_bayer_order(line);
 	u32 val, even_cfg, odd_cfg;
 
-	if (vfe_is_bayer(line)) {
+	if (order) {
 		writel_relaxed(1, vfe->base + VFE_0_DEMUX_CFG);
 		val = VFE_0_DEMUX_GAIN_0_CH0_EVEN | VFE_0_DEMUX_GAIN_0_CH0_ODD;
 		writel_relaxed(val, vfe->base + VFE_0_DEMUX_GAIN_0);
@@ -806,10 +843,8 @@ static void vfe_set_demux_cfg(struct vfe_device *vfe, struct vfe_line *line)
 		val = VFE_0_DEMUX_GAIN_1_CH1 | VFE_0_DEMUX_GAIN_1_CH2;
 		writel_relaxed(val, vfe->base + VFE_0_DEMUX_GAIN_1);
 		writel_relaxed(val, vfe->base + VFE_0_DEMUX_R_GAIN_1);
-		writel_relaxed(VFE_0_DEMUX_EVEN_CFG_PATTERN_GRBG,
-			       vfe->base + VFE_0_DEMUX_EVEN_CFG);
-		writel_relaxed(VFE_0_DEMUX_ODD_CFG_PATTERN_GRBG,
-			       vfe->base + VFE_0_DEMUX_ODD_CFG);
+		writel_relaxed(order->even_cfg, vfe->base + VFE_0_DEMUX_EVEN_CFG);
+		writel_relaxed(order->odd_cfg, vfe->base + VFE_0_DEMUX_ODD_CFG);
 
 		/* The rest of the Bayer pipeline follows the demux */
 		vfe_set_bayer_cfg(vfe, line);
@@ -994,12 +1029,16 @@ static void vfe_set_cgc_override(struct vfe_device *vfe, u8 wm, u8 enable)
 
 static void vfe_set_camif_cfg(struct vfe_device *vfe, struct vfe_line *line)
 {
+	const struct vfe_bayer_order *order = vfe_bayer_order(line);
 	unsigned int pixel_samples;
 	u32 val;
 
 	switch (line->fmt[MSM_VFE_PAD_SINK].code) {
+	case MEDIA_BUS_FMT_SRGGB10_1X10:
 	case MEDIA_BUS_FMT_SGRBG10_1X10:
-		val = VFE_0_CORE_CFG_PIXEL_PATTERN_GRGRGR;
+	case MEDIA_BUS_FMT_SBGGR10_1X10:
+	case MEDIA_BUS_FMT_SGBRG10_1X10:
+		val = order->pattern;
 		break;
 	case MEDIA_BUS_FMT_YUYV8_1X16:
 		val = VFE_0_CORE_CFG_PIXEL_PATTERN_YCBYCR;
