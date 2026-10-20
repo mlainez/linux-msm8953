@@ -329,8 +329,14 @@
 
 &pmi632_qg {
 	monitored-battery = <&battery>;
+	power-supplies = <&pmi632_charger>;
 	io-channels = <&pmi632_adc ADC5_BAT_THERM_100K_PU>;
 	io-channel-names = "batt-therm";
+	status = "okay";
+};
+
+&pmi632_charger {
+	monitored-battery = <&battery>;
 	status = "okay";
 };
 
