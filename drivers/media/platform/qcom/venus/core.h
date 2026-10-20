@@ -99,6 +99,7 @@ struct venus_resources {
 	u32 cp_nonpixel_start;
 	u32 cp_nonpixel_size;
 	const char *fwname;
+	bool no_codec_power_collapse;
 	const char *enc_nodename;
 	const char *dec_nodename;
 	const struct firmware_version *min_fw;
@@ -183,6 +184,9 @@ struct venus_format {
  * @dump_core:	a flag indicating that a core dump is required
  * @ocs:	OF changeset pointer
  * @hwmode_dev:	a flag indicating that HW_CTRL_TRIGGER is used in clock driver
+ * @core_rate:	the core clock rate last set
+ * @video_avg_bw:	the average bandwidth last voted on @video_path
+ * @video_peak_bw:	the peak bandwidth last voted on @video_path
  */
 struct venus_core {
 	void __iomem *base;
@@ -243,6 +247,9 @@ struct venus_core {
 	unsigned long dump_core;
 	struct of_changeset *ocs;
 	bool hwmode_dev;
+	unsigned long core_rate;
+	u32 video_avg_bw;
+	u32 video_peak_bw;
 };
 
 struct vdec_controls {
@@ -447,9 +454,13 @@ enum venus_inst_modes {
  * @bit_depth:		current bitstream bit-depth
  * @pic_struct:		bitstream progressive vs interlaced
  * @next_buf_last: a flag to mark next queued capture buffer as last
+ * @codec_held: the encoder holds the codec powered for its loaded session
  * @drain_active:	Drain sequence is in progress
  * @flags:	bitmask flags describing current instance mode
  * @dpb_ids:	DPB buffer ID's
+ * @enc_frames:	encoder input frames queued, which picks their @tss slot
+ * @enc_ts_us:	the timestamp given to the firmware for the next encoder
+ *		input frame
  */
 struct venus_inst {
 	struct list_head list;
@@ -518,9 +529,12 @@ struct venus_inst {
 	unsigned int bit_depth;
 	unsigned int pic_struct;
 	bool next_buf_last;
+	bool codec_held;
 	bool drain_active;
 	enum venus_inst_modes flags;
 	struct ida dpb_ids;
+	u32 enc_frames;
+	u64 enc_ts_us;
 };
 
 #define IS_V1(core)	((core)->res->hfi_version == HFI_VERSION_1XX)
