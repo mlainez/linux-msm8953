@@ -74,11 +74,11 @@ static int slim_device_probe(struct device *dev)
 	if (!ret) {
 		slim_device_update_status(sbdev, SLIM_DEVICE_STATUS_UP);
 	} else {
-		dev_err(&sbdev->dev, "Failed to get logical address\n");
-		ret = -EPROBE_DEFER;
+		dev_dbg(&sbdev->dev,
+			"logical address not yet available, deferring status update\n");
 	}
 
-	return ret;
+	return 0;
 }
 
 static void slim_device_remove(struct device *dev)
@@ -304,6 +304,83 @@ int slim_unregister_controller(struct slim_controller *ctrl)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(slim_unregister_controller);
+
+/**
+ * slim_alloc_mgrports() - allocate manager-side data ports
+ *
+ * @sb: client (codec) slim device requesting ports
+ * @nports: number of manager-side ports to allocate
+ * @ports: caller-provided array, filled in with the manager-side
+ *	port numbers (port_b) on success
+ *
+ * Some controllers (e.g. the Qualcomm MSM8953 NGD) own data pipes on
+ * the AP side of the bus. A codec stream then needs both a slave-side
+ * port (set up by slim_stream_prepare()) and a manager-side port
+ * connected to the same channel.
+ *
+ * Controllers without manager-side data ports leave ->alloc_port
+ * NULL; this call then returns -EOPNOTSUPP and the codec driver
+ * should fall back to its slave-only path.
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int slim_alloc_mgrports(struct slim_device *sb, unsigned int nports,
+			u8 *ports)
+{
+	struct slim_controller *ctrl = sb->ctrl;
+	unsigned int i;
+	int ret;
+
+	if (!ctrl || !ports || nports == 0)
+		return -EINVAL;
+	if (!ctrl->alloc_port)
+		return -EOPNOTSUPP;
+
+	for (i = 0; i < nports; i++) {
+		ret = ctrl->alloc_port(ctrl, &ports[i]);
+		if (ret) {
+			/* Roll back successfully-allocated ports */
+			while (i-- > 0) {
+				if (ctrl->dealloc_port)
+					ctrl->dealloc_port(ctrl, ports[i]);
+			}
+			return ret;
+		}
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(slim_alloc_mgrports);
+
+/**
+ * slim_dealloc_mgrports() - release manager-side data ports
+ *
+ * @sb: client slim device that allocated @ports
+ * @nports: number of ports in @ports
+ * @ports: array of port_b values returned by slim_alloc_mgrports
+ *
+ * Return: 0 on success, negative errno on failure (-EOPNOTSUPP if the
+ * controller doesn't manage manager-side ports).
+ */
+int slim_dealloc_mgrports(struct slim_device *sb, unsigned int nports,
+			  u8 *ports)
+{
+	struct slim_controller *ctrl = sb->ctrl;
+	unsigned int i;
+	int ret = 0, last_err = 0;
+
+	if (!ctrl || !ports)
+		return -EINVAL;
+	if (!ctrl->dealloc_port)
+		return -EOPNOTSUPP;
+
+	for (i = 0; i < nports; i++) {
+		ret = ctrl->dealloc_port(ctrl, ports[i]);
+		if (ret)
+			last_err = ret;
+	}
+	return last_err;
+}
+EXPORT_SYMBOL_GPL(slim_dealloc_mgrports);
 
 /**
  * slim_report_absent() - Controller calls this function when a device

@@ -363,8 +363,9 @@ static void wcd_clsh_set_flyback_current(struct snd_soc_component *comp,
 
 	snd_soc_component_update_bits(comp, WCD9XXX_RX_BIAS_FLYB_BUFF,
 				WCD9XXX_RX_BIAS_FLYB_VPOS_5_UA_MASK, 0x0A);
+	/* VNEG occupies the high nibble (mask 0xf0) */
 	snd_soc_component_update_bits(comp, WCD9XXX_RX_BIAS_FLYB_BUFF,
-				WCD9XXX_RX_BIAS_FLYB_VNEG_5_UA_MASK, 0x0A);
+				WCD9XXX_RX_BIAS_FLYB_VNEG_5_UA_MASK, 0xA0);
 	/* Sleep needed to avoid click and pop as per HW requirement */
 	usleep_range(100, 110);
 }
