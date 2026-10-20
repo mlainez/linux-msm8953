@@ -146,8 +146,14 @@ int slim_do_transfer(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 	}
 
 	ret = ctrl->xfer_msg(ctrl, txn);
-	if (ret == -ETIMEDOUT) {
-		slim_free_txn_tid(ctrl, txn);
+	if (ret) {
+		/*
+		 * On any transfer error no response will arrive, so
+		 * slim_msg_response() never frees the TID. Free it here, or
+		 * the TID space is exhausted after repeated NACKs.
+		 */
+		if (need_tid)
+			slim_free_txn_tid(ctrl, txn);
 	} else if (!ret && need_tid && !txn->msg->comp) {
 		unsigned long ms = txn->rl + HZ;
 
@@ -159,9 +165,14 @@ int slim_do_transfer(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 		}
 	}
 
+	/*
+	 * Codecs such as WCD9335 NACK control reads while streaming and may
+	 * NACK many accesses during init.
+	 */
 	if (ret)
-		dev_err(ctrl->dev, "Tx:MT:0x%x, MC:0x%x, LA:0x%x failed:%d\n",
-			txn->mt, txn->mc, txn->la, ret);
+		dev_err_ratelimited(ctrl->dev,
+				    "Tx:MT:0x%x, MC:0x%x, LA:0x%x failed:%d\n",
+				    txn->mt, txn->mc, txn->la, ret);
 
 slim_xfer_err:
 	if (!clk_pause_msg && (txn->tid == 0  || ret == -ETIMEDOUT)) {
@@ -179,8 +190,13 @@ EXPORT_SYMBOL_GPL(slim_do_transfer);
 static int slim_val_inf_sanity(struct slim_controller *ctrl,
 			       struct slim_val_inf *msg, u8 mc)
 {
+	/*
+	 * Value-element offsets are 12 bits on the wire. WCD9335 places its
+	 * register window at offset 0x800, so callers may pass offsets up to
+	 * 0x17ff; only the low 12 bits are transmitted.
+	 */
 	if (!msg || msg->num_bytes > 16 ||
-	    (msg->start_offset + msg->num_bytes) > 0xC00)
+	    ((msg->start_offset & 0xFFF) + msg->num_bytes) > 0x1000)
 		goto reterr;
 	switch (mc) {
 	case SLIM_MSG_MC_REQUEST_VALUE:
