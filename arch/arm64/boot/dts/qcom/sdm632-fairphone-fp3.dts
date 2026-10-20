@@ -513,7 +513,7 @@
 };
 
 &venus {
-	firmware-name = "qcom/msm8953/fairphone/fp3/venus.mbn";
+	firmware-name = "venus.mdt";
 
 	status = "okay";
 };
