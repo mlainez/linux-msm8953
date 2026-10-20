@@ -36,7 +36,7 @@
 
 		vana-supply = <&pm8953_l22>;
 		vdig-supply = <&pm8953_l2>;
-		vif-supply = <&cam_vio>;
+		vif-supply = <&vreg_cam_io_1p8>;
 
 		rotation = <270>;
 		orientation = <1>;
@@ -57,7 +57,7 @@
 		compatible = "onnn,lc898217xc";
 		reg = <0x72>;
 
-		vdd-supply = <&cam_vaf>;
+		vdd-supply = <&vreg_cam_af_2p85>;
 	};
 };
 

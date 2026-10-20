@@ -77,6 +77,7 @@
 		gpio = <&tlmm 128 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 
+		startup-delay-us = <10000>;
 		vin-supply = <&vph_pwr>;
 	};
 
@@ -89,6 +90,8 @@
 		gpio = <&tlmm 130 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 
+		startup-delay-us = <10000>;
+		regulator-always-on;
 		vin-supply = <&vph_pwr>;
 	};
 
@@ -101,6 +104,7 @@
 		gpio = <&tlmm 46 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 
+		startup-delay-us = <200>;
 		vin-supply = <&vph_pwr>;
 	};
 
@@ -117,40 +121,6 @@
 		regulator-name = "vph_pwr";
 		regulator-always-on;
 		regulator-boot-on;
-	};
-
-	/* Camera IOVDD, active-high enable on GPIO 130, shared by both cameras */
-	cam_vio: cam-vio-regulator {
-		compatible = "regulator-fixed";
-		regulator-name = "cam_vio";
-		regulator-min-microvolt = <1800000>;
-		regulator-max-microvolt = <1800000>;
-		gpio = <&tlmm 130 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-		startup-delay-us = <10000>;
-		regulator-always-on;
-	};
-
-	/* Rear camera AF actuator supply, active-high enable on GPIO 128 */
-	cam_vaf: cam-vaf-regulator {
-		compatible = "regulator-fixed";
-		regulator-name = "cam_vaf";
-		regulator-min-microvolt = <2850000>;
-		regulator-max-microvolt = <2850000>;
-		gpio = <&tlmm 128 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-		startup-delay-us = <10000>;
-	};
-
-	/* Front camera DVDD, active-high enable on GPIO 46 */
-	cam_vdig_front: cam-vdig-front-regulator {
-		compatible = "regulator-fixed";
-		regulator-name = "cam_vdig_front";
-		regulator-min-microvolt = <1200000>;
-		regulator-max-microvolt = <1200000>;
-		gpio = <&tlmm 46 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-		startup-delay-us = <200>;
 	};
 
 	/*
@@ -177,7 +147,7 @@
 
 			vana-supply = <&pm8953_l22>;
 			vdig-supply = <&pm8953_l2>;
-			vif-supply = <&cam_vio>;
+			vif-supply = <&vreg_cam_io_1p8>;
 		};
 
 		slot-front-camera {
@@ -188,8 +158,8 @@
 			enable-gpios = <&tlmm 129 GPIO_ACTIVE_HIGH>;
 
 			vana-supply = <&pm8953_l22>;
-			vdig-supply = <&cam_vdig_front>;
-			vif-supply = <&cam_vio>;
+			vdig-supply = <&vreg_cam2_dig_1p2>;
+			vif-supply = <&vreg_cam_io_1p8>;
 		};
 
 		slot-speaker-amp {

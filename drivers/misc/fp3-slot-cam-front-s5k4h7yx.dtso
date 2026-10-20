@@ -30,8 +30,8 @@
 		reset-gpios = <&tlmm 129 GPIO_ACTIVE_LOW>;
 
 		vana-supply = <&pm8953_l22>;
-		vdig-supply = <&cam_vdig_front>;
-		vif-supply = <&cam_vio>;
+		vdig-supply = <&vreg_cam2_dig_1p2>;
+		vif-supply = <&vreg_cam_io_1p8>;
 
 		rotation = <270>;
 		orientation = <0>;
