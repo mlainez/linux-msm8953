@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Fairphone 3 rear camera module: Sony IMX363 (12MP) behind an
+ * ON Semiconductor LC898217XC voice coil motor, on CSIPHY0.
+ *
+ * Applied by drivers/misc/fp3_module_slot.c when the rear slot answers
+ * at 0x10 with chip ID 0x0363 — some Fairphone 3 rear camera modules
+ * strap the sensor to 0x10 rather than the 0x1a the mainline device tree
+ * assumed.
+ *
+ */
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/clock/qcom,gcc-msm8953.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/leds/common.h>
+
+&cci_i2c0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	camera-sensor@10 {
+		compatible = "sony,imx363";
+		reg = <0x10>;
+
+		clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
+		clock-frequency = <24000000>;
+		assigned-clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
+		assigned-clock-rates = <24000000>;
+
+		reset-gpios = <&tlmm 40 GPIO_ACTIVE_LOW>;
+
+		vana-supply = <&pm8953_l22>;
+		vdig-supply = <&pm8953_l2>;
+		vif-supply = <&cam_vio>;
+
+		rotation = <270>;
+		orientation = <1>;
+
+		flash-leds = <&fp3_flash_led0>, <&fp3_flash_led1>;
+		lens-focus = <&fp3_rear_actuator>;
+
+		port {
+			fp3_rear_cam_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				link-frequencies = /bits/ 64 <620000000 350000000 510000000>;
+				remote-endpoint = <&fp3_csiphy0_ep>;
+			};
+		};
+	};
+
+	fp3_rear_actuator: camera-lens@72 {
+		compatible = "onnn,lc898217xc";
+		reg = <0x72>;
+
+		vdd-supply = <&cam_vaf>;
+	};
+};
+
+&camss {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			fp3_csiphy0_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&fp3_rear_cam_ep>;
+			};
+		};
+	};
+};

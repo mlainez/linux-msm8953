@@ -72,6 +72,25 @@ obj-$(CONFIG_MARVELL_CN10K_DPI)	+= mrvl_cn10k_dpi.o
 lan966x-pci-objs		:= lan966x_pci.o
 lan966x-pci-objs		+= lan966x_pci.dtbo.o
 obj-$(CONFIG_MCHP_LAN966X_PCI)	+= lan966x-pci.o
+fp3-module-slots-objs		:= fp3_module_slot.o
+fp3-module-slots-objs		+= fp3-slot-cam-rear-imx363-1a.dtbo.o
+fp3-module-slots-objs		+= fp3-slot-cam-rear-imx363-10.dtbo.o
+fp3-module-slots-objs		+= fp3-slot-cam-rear-s5kgm1sp.dtbo.o
+fp3-module-slots-objs		+= fp3-slot-cam-front-s5k4h7yx.dtbo.o
+fp3-module-slots-objs		+= fp3-slot-cam-front-s5k3p9sp.dtbo.o
+fp3-module-slots-objs		+= fp3-slot-spk-aw8898.dtbo.o
+fp3-module-slots-objs		+= fp3-slot-spk-tas2557.dtbo.o
+fp3-module-slots-objs		+= fp3-slot-camss.dtbo.o
+obj-$(CONFIG_FP3_MODULE_SLOTS)	+= fp3-module-slots.o
+# The base device tree already declares #address-cells/#size-cells on the
+# camss `ports` node, and each overlay contributes exactly one port — which
+# dtc flags as redundant addressing even though it is required to give the
+# port a unit address.
+DTC_FLAGS_fp3-slot-cam-rear-imx363-1a	+= -Wno-graph_child_address
+DTC_FLAGS_fp3-slot-cam-rear-imx363-10	+= -Wno-graph_child_address
+DTC_FLAGS_fp3-slot-cam-rear-s5kgm1sp	+= -Wno-graph_child_address
+DTC_FLAGS_fp3-slot-cam-front-s5k4h7yx	+= -Wno-graph_child_address
+DTC_FLAGS_fp3-slot-cam-front-s5k3p9sp	+= -Wno-graph_child_address
 obj-y				+= keba/
 obj-y				+= amd-sbi/
 obj-$(CONFIG_MISC_RP1)		+= rp1/

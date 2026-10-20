@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Fairphone 3 top module: Samsung S5K4H7YX (8MP) front camera on
+ * CSIPHY2.
+ *
+ * Applied by drivers/misc/fp3_module_slot.c when the front slot answers
+ * at 0x10 with model ID 0x487b.  The Fairphone 3+ sensor lives at the
+ * same address, which is why the slot has to be identified by ID rather
+ * than by which address acknowledges.
+ */
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/clock/qcom,gcc-msm8953.h>
+#include <dt-bindings/gpio/gpio.h>
+
+&cci_i2c1 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	camera-sensor@10 {
+		compatible = "samsung,s5k4h7yx";
+		reg = <0x10>;
+
+		clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
+		clock-frequency = <24000000>;
+		assigned-clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
+		assigned-clock-rates = <24000000>;
+
+		reset-gpios = <&tlmm 129 GPIO_ACTIVE_LOW>;
+
+		vana-supply = <&pm8953_l22>;
+		vdig-supply = <&cam_vdig_front>;
+		vif-supply = <&cam_vio>;
+
+		rotation = <270>;
+		orientation = <0>;
+
+		port {
+			fp3_front_cam_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				link-frequencies = /bits/ 64 <350000000>;
+				remote-endpoint = <&fp3_csiphy2_ep>;
+			};
+		};
+	};
+};
+
+&camss {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@2 {
+			reg = <2>;
+
+			fp3_csiphy2_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&fp3_front_cam_ep>;
+			};
+		};
+	};
+};
