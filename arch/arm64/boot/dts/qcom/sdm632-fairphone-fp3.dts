@@ -44,6 +44,23 @@
 		regulator-max-microvolt = <5500000>;
 	};
 
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/*
+		 * The MBA reads the modem image's metadata from DDR before it
+		 * authenticates it, and it rejects a buffer high in the
+		 * 4 GB of RAM with "MPSS header authentication failed: -3".
+		 * Keep the buffer next to the MBA's own region.
+		 */
+		mpss_mdata_mem: mpss-metadata@92100000 {
+			reg = <0x0 0x92100000 0x0 0x100000>;
+			no-map;
+		};
+	};
+
 	vph_pwr: vph-pwr-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "vph_pwr";
@@ -168,6 +185,10 @@
 	pll-supply = <&pm8953_l7>;
 
 	status = "okay";
+
+	metadata {
+		memory-region = <&mpss_mdata_mem>;
+	};
 };
 
 &pm8953_resin {
