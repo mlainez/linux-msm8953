@@ -27,6 +27,7 @@
 #define to_smd_subdev(d) container_of(d, struct qcom_rproc_subdev, subdev)
 #define to_ssr_subdev(d) container_of(d, struct qcom_rproc_ssr, subdev)
 #define to_pdm_subdev(d) container_of(d, struct qcom_rproc_pdm, subdev)
+#define to_sns_reg_subdev(d) container_of(d, struct qcom_rproc_sns_reg, subdev)
 
 #define MAX_NUM_OF_SS           10
 #define MAX_REGION_NAME_LENGTH  16
@@ -85,6 +86,7 @@ struct minidump_global_toc {
 
 struct qcom_ssr_subsystem {
 	const char *name;
+	enum qcom_ssr_notify_type last_status;
 	struct srcu_notifier_head notifier_list;
 	struct list_head list;
 };
@@ -384,6 +386,7 @@ static struct qcom_ssr_subsystem *qcom_ssr_get_subsys(const char *name)
 		goto out;
 	}
 	info->name = kstrdup_const(name, GFP_KERNEL);
+	info->last_status = QCOM_SSR_STATUS_UNKNOWN;
 	srcu_init_notifier_head(&info->notifier_list);
 
 	/* Add to global notification list */
@@ -436,6 +439,27 @@ int qcom_unregister_ssr_notifier(void *notify, struct notifier_block *nb)
 }
 EXPORT_SYMBOL_GPL(qcom_unregister_ssr_notifier);
 
+/**
+ * qcom_ssr_last_status() - get last known subsytem state
+ * @name:	subsystem name, e.g. "lpass"
+ *
+ * This function can be used to check if specific remote processor
+ * is running or stopped.
+ *
+ * Return: last known status, or QCOM_SSR_STATUS_UNKNOWN.
+ */
+enum qcom_ssr_notify_type qcom_ssr_last_status(const char *name)
+{
+	struct qcom_ssr_subsystem *info;
+
+	info = qcom_ssr_get_subsys(name);
+	if (IS_ERR(info))
+		return QCOM_SSR_STATUS_UNKNOWN;
+
+	return info->last_status;
+}
+EXPORT_SYMBOL_GPL(qcom_ssr_last_status);
+
 static int ssr_notify_prepare(struct rproc_subdev *subdev)
 {
 	struct qcom_rproc_ssr *ssr = to_ssr_subdev(subdev);
@@ -443,6 +467,9 @@ static int ssr_notify_prepare(struct rproc_subdev *subdev)
 		.name = ssr->info->name,
 		.crashed = false,
 	};
+
+	/* save last known status */
+	ssr->info->last_status = QCOM_SSR_BEFORE_POWERUP;
 
 	srcu_notifier_call_chain(&ssr->info->notifier_list,
 				 QCOM_SSR_BEFORE_POWERUP, &data);
@@ -457,6 +484,9 @@ static int ssr_notify_start(struct rproc_subdev *subdev)
 		.crashed = false,
 	};
 
+	/* save last known status */
+	ssr->info->last_status = QCOM_SSR_AFTER_POWERUP;
+
 	srcu_notifier_call_chain(&ssr->info->notifier_list,
 				 QCOM_SSR_AFTER_POWERUP, &data);
 	return 0;
@@ -470,6 +500,9 @@ static void ssr_notify_stop(struct rproc_subdev *subdev, bool crashed)
 		.crashed = crashed,
 	};
 
+	/* save last known status */
+	ssr->info->last_status = QCOM_SSR_BEFORE_SHUTDOWN;
+
 	srcu_notifier_call_chain(&ssr->info->notifier_list,
 				 QCOM_SSR_BEFORE_SHUTDOWN, &data);
 }
@@ -481,6 +514,9 @@ static void ssr_notify_unprepare(struct rproc_subdev *subdev)
 		.name = ssr->info->name,
 		.crashed = false,
 	};
+
+	/* save last known status */
+	ssr->info->last_status = QCOM_SSR_AFTER_SHUTDOWN;
 
 	srcu_notifier_call_chain(&ssr->info->notifier_list,
 				 QCOM_SSR_AFTER_SHUTDOWN, &data);
@@ -613,6 +649,84 @@ void qcom_remove_pdm_subdev(struct rproc *rproc, struct qcom_rproc_pdm *pdm)
 	rproc_remove_subdev(rproc, &pdm->subdev);
 }
 EXPORT_SYMBOL_GPL(qcom_remove_pdm_subdev);
+
+static int sns_reg_prepare(struct rproc_subdev *subdev)
+{
+	struct qcom_rproc_sns_reg *sns_reg = to_sns_reg_subdev(subdev);
+	struct auxiliary_device *adev;
+	int ret;
+
+	adev = kzalloc(sizeof(*adev), GFP_KERNEL);
+	if (!adev)
+		return -ENOMEM;
+
+	adev->dev.parent = sns_reg->rproc_dev;
+	/* yes, we can reuse release helper from PDM */
+	adev->dev.release = pdm_dev_release;
+	adev->name = "sns-reg";
+	adev->id = sns_reg->rproc_index;
+
+	ret = auxiliary_device_init(adev);
+	if (ret) {
+		kfree(adev);
+		return ret;
+	}
+
+	ret = auxiliary_device_add(adev);
+	if (ret) {
+		auxiliary_device_uninit(adev);
+		return ret;
+	}
+
+	sns_reg->adev = adev;
+
+	return 0;
+}
+
+static void sns_reg_unprepare(struct rproc_subdev *subdev)
+{
+	struct qcom_rproc_sns_reg *sns_reg = to_sns_reg_subdev(subdev);
+
+	if (!sns_reg->adev)
+		return;
+
+	auxiliary_device_delete(sns_reg->adev);
+	auxiliary_device_uninit(sns_reg->adev);
+	sns_reg->adev = NULL;
+}
+
+/**
+ * qcom_add_sns_reg_subdev() - register sns-reg subdevice
+ * @rproc:	rproc handle
+ * @sns_reg:	sns-reg subdevice handle
+ *
+ * Register @sns_reg so that Sensor Registry service is started when the
+ * DSP is started.
+ */
+void qcom_add_sns_reg_subdev(struct rproc *rproc, struct qcom_rproc_sns_reg *sns_reg)
+{
+	sns_reg->rproc_dev = &rproc->dev;
+	sns_reg->rproc_index = rproc->index;
+
+	sns_reg->subdev.prepare = sns_reg_prepare;
+	sns_reg->subdev.unprepare = sns_reg_unprepare;
+
+	rproc_add_subdev(rproc, &sns_reg->subdev);
+}
+EXPORT_SYMBOL_GPL(qcom_add_sns_reg_subdev);
+
+/**
+ * qcom_remove_sns_reg_subdev() - remove sns-reg subdevice
+ * @rproc:	rproc handle
+ * @sns_reg:	sns-reg subdevice handle
+ *
+ * Remove the Sensor Registry subdevice.
+ */
+void qcom_remove_sns_reg_subdev(struct rproc *rproc, struct qcom_rproc_sns_reg *sns_reg)
+{
+	rproc_remove_subdev(rproc, &sns_reg->subdev);
+}
+EXPORT_SYMBOL_GPL(qcom_remove_sns_reg_subdev);
 
 MODULE_DESCRIPTION("Qualcomm Remoteproc helper driver");
 MODULE_LICENSE("GPL v2");
