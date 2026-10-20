@@ -321,6 +321,7 @@ enum smb_generation {
 #define INPUT_CURRENT_LIMIT_MASK			GENMASK(7, 0)
 
 #define SMB2_ICL_STATUS					0x607
+#define SMB5_ICL_STATUS					0x107
 #define SMB5_AICL_ICL_STATUS				0x108
 
 #define POWER_PATH_STATUS(smb)				(SMB_REG_OFFSET(smb) + 0x0B)
@@ -1310,6 +1311,23 @@ static const struct smb_match_data pm8150b_match_data = {
 	.usbin_current_scale = 5,
 };
 
+/* Limits and ICL status register follow the downstream PMI632 parameters. */
+static const struct smb_match_data pmi632_match_data = {
+	.init_seq = smb5_init_seq,
+	.init_seq_len = ARRAY_SIZE(smb5_init_seq),
+	.name = "pmi632",
+	.gen = SMB5,
+	.fv_min_uv = 3600000,
+	.fv_max_uv = 4800000,
+	.fv_step_uv = 10000,
+	.fcc_max_ua = 3000000,
+	.fcc_step_ua = 50000,
+	.icl_max_ua = 3000000,
+	.icl_step_ua = 50000,
+	.icl_status = SMB5_ICL_STATUS,
+	.usbin_current_scale = 5,
+};
+
 static int smb_init_hw(struct smb_chip *chip,
 		       const struct smb_init_register *init_seq, size_t len)
 {
@@ -1531,6 +1549,7 @@ static const struct of_device_id smb_match_id_table[] = {
 	{ .compatible = "qcom,pmi8998-charger", .data = &pmi8998_match_data },
 	{ .compatible = "qcom,pm660-charger", .data = &pm660_match_data },
 	{ .compatible = "qcom,pm8150b-charger", .data = &pm8150b_match_data },
+	{ .compatible = "qcom,pmi632-charger", .data = &pmi632_match_data },
 	{ /* sentinal */ }
 };
 MODULE_DEVICE_TABLE(of, smb_match_id_table);
