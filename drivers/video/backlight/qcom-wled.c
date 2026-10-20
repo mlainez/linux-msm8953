@@ -1251,13 +1251,13 @@ static const struct wled_var_cfg wled4_ovp_cfg = {
 	.size = ARRAY_SIZE(wled4_ovp_values),
 };
 
-static const u32 pmi8950_wled4_ovp_values[] = {
+static const u32 pmi8994_wled_ovp_values[] = {
 	31000, 29500, 19400, 17800,
 };
 
-static const struct wled_var_cfg pmi8950_wled4_ovp_cfg = {
-	.values = pmi8950_wled4_ovp_values,
-	.size = ARRAY_SIZE(pmi8950_wled4_ovp_values),
+static const struct wled_var_cfg pmi8994_wled_ovp_cfg = {
+	.values = pmi8994_wled_ovp_values,
+	.size = ARRAY_SIZE(pmi8994_wled_ovp_values),
 };
 
 static inline u32 wled5_ovp_values_fn(u32 idx)
@@ -1373,7 +1373,7 @@ static int wled_configure(struct wled *wled)
 		},
 	};
 
-	const struct wled_u32_opts pmi8950_wled4_opts[] = {
+	const struct wled_u32_opts pmi8994_wled_opts[] = {
 		{
 			.name = "qcom,current-boost-limit",
 			.val_ptr = &cfg->boost_i_limit,
@@ -1387,7 +1387,7 @@ static int wled_configure(struct wled *wled)
 		{
 			.name = "qcom,ovp-millivolt",
 			.val_ptr = &cfg->ovp,
-			.cfg = &pmi8950_wled4_ovp_cfg,
+			.cfg = &pmi8994_wled_ovp_cfg,
 		},
 		{
 			.name = "qcom,switching-freq",
@@ -1462,9 +1462,10 @@ static int wled_configure(struct wled *wled)
 		break;
 
 	case 4:
-		if (of_device_is_compatible(dev->of_node, "qcom,pmi8950-wled")) {
-			u32_opts = pmi8950_wled4_opts;
-			size = ARRAY_SIZE(pmi8950_wled4_opts);
+		if (of_device_is_compatible(dev->of_node, "qcom,pmi8950-wled") ||
+		    of_device_is_compatible(dev->of_node, "qcom,pmi8994-wled")) {
+			u32_opts = pmi8994_wled_opts;
+			size = ARRAY_SIZE(pmi8994_wled_opts);
 		} else {
 			u32_opts = wled4_opts;
 			size = ARRAY_SIZE(wled4_opts);
