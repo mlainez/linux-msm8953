@@ -661,6 +661,32 @@ static void venc_pm_touch(struct venus_inst *inst)
 	pm_runtime_mark_last_busy(inst->core->dev_enc);
 }
 
+/*
+ * HFI v3 firmware encodes in power save mode at about half the cycles per
+ * macroblock of full quality, which keeps sessions heavier than the top
+ * clock carries at full quality, such as 4K at 30 fps, at their frame rate.
+ * The firmware takes the mode only before the session allocates its
+ * buffers.
+ */
+static int venc_set_perf_mode(struct venus_inst *inst)
+{
+	const struct venus_resources *res = inst->core->res;
+	u32 mode = HFI_VENC_PERFMODE_MAX_QUALITY;
+	u32 mbs;
+
+	if (!IS_V3(inst->core) || !res->freq_tbl_size)
+		return 0;
+
+	mbs = (ALIGN(inst->width, 16) / 16) * (ALIGN(inst->height, 16) / 16);
+
+	if (mbs * inst->fps > res->freq_tbl[0].load &&
+	    inst->controls.enc.bitrate_mode != V4L2_MPEG_VIDEO_BITRATE_MODE_CQ)
+		mode = HFI_VENC_PERFMODE_POWER_SAVE;
+
+	return hfi_session_set_property(inst, HFI_PROPERTY_CONFIG_VENC_PERF_MODE,
+					&mode);
+}
+
 static int venc_set_properties(struct venus_inst *inst)
 {
 	struct venc_controls *ctr = &inst->controls.enc;
@@ -687,6 +713,10 @@ static int venc_set_properties(struct venus_inst *inst)
 	frate.framerate = inst->fps * (1 << 16);
 
 	ret = hfi_session_set_property(inst, ptype, &frate);
+	if (ret)
+		return ret;
+
+	ret = venc_set_perf_mode(inst);
 	if (ret)
 		return ret;
 
@@ -767,9 +797,12 @@ static int venc_set_properties(struct venus_inst *inst)
 		 * n = 0 - only the first I-frame is IDR frame
 		 * n = 1 - all I-frames will be IDR frames
 		 * n > 1 - every n-th I-frame will be IDR frame
+		 *
+		 * Every GOP starts with an IDR frame, so a decoder can join
+		 * the stream at any GOP boundary.
 		 */
 		ptype = HFI_PROPERTY_CONFIG_VENC_IDR_PERIOD;
-		idrp.idr_period = 0;
+		idrp.idr_period = 1;
 		ret = hfi_session_set_property(inst, ptype, &idrp);
 		if (ret)
 			return ret;
@@ -1204,6 +1237,11 @@ static void venc_release_session(struct venus_inst *inst)
 	INIT_LIST_HEAD(&inst->registeredbufs);
 	venus_pm_release_core(inst);
 
+	if (inst->codec_held) {
+		inst->codec_held = false;
+		venc_pm_put(inst, false);
+	}
+
 	venc_pm_put(inst, false);
 }
 
@@ -1274,17 +1312,22 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
 	inst->sequence_cap = 0;
 	inst->sequence_out = 0;
 
-	ret = venc_pm_get(inst);
-	if (ret)
-		goto error;
+	/*
+	 * The codec stays powered until the session is released: a session
+	 * whose clock and power domain go away while it is loaded stops
+	 * returning frames, and that happens whenever buffers stop arriving
+	 * for longer than the autosuspend delay.
+	 */
+	if (!inst->codec_held) {
+		ret = venc_pm_get(inst);
+		if (ret)
+			goto error;
+		inst->codec_held = true;
+	}
 
 	ret = venus_pm_acquire_core(inst);
 	if (ret)
 		goto put_power;
-
-	ret = venc_pm_put(inst, true);
-	if (ret)
-		goto error;
 
 	ret = venc_set_properties(inst);
 	if (ret)
@@ -1310,6 +1353,7 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
 	return 0;
 
 put_power:
+	inst->codec_held = false;
 	venc_pm_put(inst, false);
 error:
 	venus_helper_buffers_done(inst, q->type, VB2_BUF_STATE_QUEUED);
@@ -1379,6 +1423,7 @@ static void venc_buf_done(struct venus_inst *inst, unsigned int buf_type,
 		vb2_set_plane_payload(vb, 0, bytesused + data_offset);
 		vb->planes[0].data_offset = data_offset;
 		vb->timestamp = timestamp_us * NSEC_PER_USEC;
+		venus_helper_get_ts_metadata(inst, timestamp_us, vbuf);
 		vbuf->sequence = inst->sequence_cap++;
 		if ((vbuf->flags & V4L2_BUF_FLAG_LAST) &&
 		    inst->enc_state == VENUS_ENC_STATE_DRAIN) {

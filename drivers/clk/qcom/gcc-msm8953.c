@@ -3873,7 +3873,10 @@ static struct gdsc venus_core0_gdsc = {
 	.pd = {
 		.name = "venus_core0",
 	},
-	.flags = HW_CTRL,
+	/*
+	 * Not under hardware control: the codec hangs on the first frame
+	 * after the video firmware has collapsed it through this GDSC.
+	 */
 	.pwrsts = PWRSTS_OFF_ON,
 };
 
